@@ -2,9 +2,6 @@
   "name": "any-listen-proxy-0fd437cd",
   "private": true,
   "type": "module",
-  "scripts": {
-    "deploy": "wrangler deploy"
-  },
   "devDependencies": {
     "wrangler": "4.102.0"
   }
