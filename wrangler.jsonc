@@ -1,0 +1,12 @@
+{
+  "name": "any-listen-proxy-0fd437cd",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-11",
+  "workers_dev": true,
+  "vars": {
+    "APP_ORIGIN": "https://any-listen-browser-zhs.zhanghaosheng628.chatgpt.site"
+  },
+  "observability": {
+    "enabled": false
+  }
+}
