@@ -10,7 +10,7 @@
 
 ## 配置
 
-服务名称为 any-listen-proxy-0fd437cd，允许的播放器地址为 https://any-listen-browser-zhs.zhanghaosheng628.chatgpt.site。APP_ORIGIN 和 PROXY_KEY 已写入 wrangler.jsonc。工程包含连接密钥，请保持仓库私有。修改密钥时需要同步修改 App 配置。若旧服务已经设置了同名 Secret，需先删除旧 PROXY_KEY Secret 后再由仓库配置部署。BILI_USER_AGENT、BILI_ORIGIN、BILI_REFERER 是发往 B 站的固定请求头，可在 wrangler.jsonc 中调整；Cookie 默认关闭。只有明确需要验证登录态时，才在 Cloudflare 的 Worker 设置中新增名为 BILI_COOKIE 的 Secret。它只发往精确列出的 B 站 API 路径，不会接收 App 来的 Cookie，不写入代码仓库或云端日志；通过鉴权的手动诊断会返回实际发送的 Cookie。Cloudflare 会按 Secret 方式保存该值；它不是匿名访问所必需的，也不会改变账号本身的内容权限。
+服务名称为 any-listen-proxy-0fd437cd，允许的播放器地址为 https://any-listen-browser-zhs.zhanghaosheng628.chatgpt.site。APP_ORIGIN 和 PROXY_KEY 已写入 wrangler.jsonc。工程包含连接密钥，请保持仓库私有。修改密钥时需要同步修改 App 配置。若旧服务已经设置了同名 Secret，需先删除旧 PROXY_KEY Secret 后再由仓库配置部署。BILI_USER_AGENT、BILI_ORIGIN、BILI_REFERER 是发往 B 站的固定请求头，可在 wrangler.jsonc 中调整；登录 Cookie 默认关闭；B 站 API 默认使用 TLS HTTP/1 转发，需要设备标识时自动获取匿名 buvid3，仅在当前 Worker 内存复用 30 分钟，不保存到云端。音频仍用 Fetch 流式传输。可设置 BILI_API_TRANSPORT=fetch 回退标准通道。只有明确需要验证登录态时，才在 Cloudflare 的 Worker 设置中新增名为 BILI_COOKIE 的 Secret。它只发往精确列出的 B 站 API 路径，不会接收 App 来的 Cookie，不写入代码仓库或云端日志；通过鉴权的手动诊断会返回实际发送的 Cookie。Cloudflare 会按 Secret 方式保存该值；它不是匿名访问所必需的，也不会改变账号本身的内容权限。
 
 ## 后续使用
 
@@ -22,10 +22,10 @@
 
 ## 诊断接口
 
-GET /diagnostics 返回 workerBuild、诊断协议版本、能力和节点信息。GET /probe?url=…&mode=request|range|head 分别执行普通 GET、首字节 Range 或 HEAD（默认 range 兼容旧客户端）。返回逐跳完整 URL、完整出站请求头（含 Cookie）、响应头（含 Set-Cookie）、上游状态和耗时，取得响应头后取消正文。HTTP 200 仅表示报告可读取，应以 outcome 和 upstream.status 判断上游结果。可选 transport=tls-socket 在相同 Worker 上作实验性 TLS/HTTP1 响应头对照，限制 443 端口和 32 KiB 响应头，不用于日常转发。X-Proxy-Probe-Headers 接受最多 32 项、16 KiB 的 JSON 请求头覆盖（null 删除），仅本次诊断及初始同源跳转生效；Host 和消息长度等连接控制头不能覆盖。Fetch 请求记录只代表 fetch 输入，无法观察 Cloudflare 最终线上头、出口 IP 或 TLS。Socket 更换传输可能同时改变出口、HTTP 版本与 TLS 特征，不能仅凭状态差异断言某个头触发拦截。接口使用相同的连接密钥保护。普通转发不生成诊断编号、不采集耗时、不触发额外诊断；只有主动诊断请求返回编号和耗时。诊断不保存到云端数据库；报告包含完整上游 URL、请求头和响应头，响应正文不读取。客户端仅保留当前会话最近 50 条记录，可在设置中导出。
+GET /diagnostics 返回 workerBuild、诊断协议版本、能力和节点信息。GET /probe?url=…&mode=request|range|head 分别执行普通 GET、首字节 Range 或 HEAD（默认 range 兼容旧客户端）。返回逐跳完整 URL、完整出站请求头（含 Cookie）、响应头（含 Set-Cookie）、上游状态和耗时，取得响应头后取消正文。HTTP 200 仅表示报告可读取，应以 outcome 和 upstream.status 判断上游结果。transport=production 使用正式转发路径并报告匿名设备请求或内存命中；transport=fetch 可作标准通道对照。可选 transport=tls-socket 在相同 Worker 上作实验性 TLS/HTTP1 响应头对照，限制 443 端口和 32 KiB 响应头，不用于日常转发。X-Proxy-Probe-Headers 接受最多 32 项、16 KiB 的 JSON 请求头覆盖（null 删除），仅本次诊断及初始同源跳转生效；Host 和消息长度等连接控制头不能覆盖。Fetch 请求记录只代表 fetch 输入，无法观察 Cloudflare 最终线上头、出口 IP 或 TLS。Socket 更换传输可能同时改变出口、HTTP 版本与 TLS 特征，不能仅凭状态差异断言某个头触发拦截。接口使用相同的连接密钥保护。普通转发不生成诊断编号、不采集耗时、不触发额外诊断；只有主动诊断请求返回编号和耗时。诊断不保存到云端数据库；报告包含完整上游 URL、请求头和响应头，目标响应正文不读取；production 可能读取匿名设备接口的必要 JSON，但不会把正文加入报告。客户端仅保留当前会话最近 50 条记录，可在设置中导出。
 
 ## 转发范围
 
 仅支持允许列表中的 HTTPS 请求，逐次验证重定向，不转发调用方 Cookie 或授权。可选的 BILI_COOKIE 只用于精确列出的 B 站 API 路径；不会发往视频 CDN，也不会跟随重定向泄漏到其他主机。支持 GET、HEAD、OPTIONS 和流式 Range 响应。平台限制、网络条件和 Cloudflare 免费额度仍适用。默认关闭日志采集及响应缓存。
 
-代码许可见 LICENSE。
+B 站 API 正式转发总时限 15 秒、响应正文上限 2 MiB；诊断总时限 8 秒。Worker 内嵌 MIT 许可的 PeronGH/socket-fetch 固定版本，完整许可保留在 worker.mjs 中。代码许可见 LICENSE。
