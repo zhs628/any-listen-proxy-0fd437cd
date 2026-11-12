@@ -22,7 +22,7 @@
 
 ## 诊断接口
 
-GET /diagnostics 返回 workerBuild、诊断协议版本、能力和节点信息。GET /probe?url=…&mode=request|range|head 分别执行普通 GET、首字节 Range 或 HEAD（默认 range 兼容旧客户端）。返回逐跳完整 URL、完整出站请求头（含 Cookie）、响应头（含 Set-Cookie）、上游状态和耗时，取得响应头后取消正文。HTTP 200 仅表示报告可读取，应以 outcome 和 upstream.status 判断上游结果。请求记录只代表 fetch 输入，无法观察 Cloudflare 最终线上头、出口 IP 或 TLS。接口使用相同的连接密钥保护。普通转发不生成诊断编号、不采集耗时、不触发额外诊断；只有主动诊断请求返回编号和耗时。诊断不保存到云端数据库；报告包含完整上游 URL、请求头和响应头，响应正文不读取。客户端仅保留当前会话最近 50 条记录，可在设置中导出。
+GET /diagnostics 返回 workerBuild、诊断协议版本、能力和节点信息。GET /probe?url=…&mode=request|range|head 分别执行普通 GET、首字节 Range 或 HEAD（默认 range 兼容旧客户端）。返回逐跳完整 URL、完整出站请求头（含 Cookie）、响应头（含 Set-Cookie）、上游状态和耗时，取得响应头后取消正文。HTTP 200 仅表示报告可读取，应以 outcome 和 upstream.status 判断上游结果。可选 transport=tls-socket 在相同 Worker 上作实验性 TLS/HTTP1 响应头对照，限制 443 端口和 32 KiB 响应头，不用于日常转发。X-Proxy-Probe-Headers 接受最多 32 项、16 KiB 的 JSON 请求头覆盖（null 删除），仅本次诊断及初始同源跳转生效；Host 和消息长度等连接控制头不能覆盖。Fetch 请求记录只代表 fetch 输入，无法观察 Cloudflare 最终线上头、出口 IP 或 TLS。Socket 更换传输可能同时改变出口、HTTP 版本与 TLS 特征，不能仅凭状态差异断言某个头触发拦截。接口使用相同的连接密钥保护。普通转发不生成诊断编号、不采集耗时、不触发额外诊断；只有主动诊断请求返回编号和耗时。诊断不保存到云端数据库；报告包含完整上游 URL、请求头和响应头，响应正文不读取。客户端仅保留当前会话最近 50 条记录，可在设置中导出。
 
 ## 转发范围
 

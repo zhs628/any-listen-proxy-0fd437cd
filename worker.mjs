@@ -20,7 +20,50 @@ function biliHeaders(target,env,base){
  else headers.delete('Cookie')
  return headers
 }
-export const workerBuild='2026-11-12.3'
+export const workerBuild='2026-11-12.4'
+function diagnosticOverrides(request){
+ const raw=request.headers.get('X-Proxy-Probe-Headers')
+ if(!raw)return []
+ if(raw.length>16384)throw Error('Diagnostic header configuration exceeds 16 KiB')
+ const values=JSON.parse(raw)
+ if(!values||Array.isArray(values)||typeof values!=='object'||Object.keys(values).length>32)throw Error('Expected at most 32 diagnostic headers')
+ return Object.entries(values).map(([name,value])=>{
+  if(!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)||/^(host|content-length|transfer-encoding|connection|upgrade|proxy-authorization|proxy-connection|trailer|te)$/i.test(name))throw Error('Unsupported diagnostic header')
+  if(value!==null&&(typeof value!=='string'||/[^\x20-\x7e]/.test(value)))throw Error('Invalid diagnostic header value')
+  return [name,value]
+ })
+}
+// Header-only TLS/HTTP1 probe. It never serves normal proxy traffic or reads a response body.
+export async function probeHttpsSocket(target,method,headers,signal,connectOverride){
+ if(!allowedTarget(target))throw Error('Target is not allowed')
+ signal.throwIfAborted()
+ const connect=connectOverride??(await import('cloudflare:sockets')).connect,u=new URL(target)
+ const socket=connect({hostname:u.hostname,port:443},{secureTransport:'on',allowHalfOpen:false})
+ socket.closed.catch(()=>{})
+ const close=()=>{socket.close().catch(()=>{})}
+ signal.addEventListener('abort',close,{once:true});if(signal.aborted)close()
+ let reader,writer
+ try{
+  const connection=await socket.opened;signal.throwIfAborted()
+  const wireHeaders=new Headers(headers);wireHeaders.set('Host',u.host);wireHeaders.set('Connection','close')
+  const requestText=`${method} ${u.pathname+u.search} HTTP/1.1\r\n`+[...wireHeaders].map(([k,v])=>`${k}: ${v}\r\n`).join('')+'\r\n'
+  writer=socket.writable.getWriter();await writer.write(new TextEncoder().encode(requestText));writer.releaseLock();writer=undefined
+  reader=socket.readable.getReader();let bytes=new Uint8Array(0),end=-1
+  while(end<0){
+   const chunk=await reader.read();signal.throwIfAborted();if(chunk.done)throw Error('Socket closed before response headers')
+   const part=chunk.value.subarray(0,Math.max(0,32768-bytes.length)),next=new Uint8Array(bytes.length+part.length);next.set(bytes);next.set(part,bytes.length);bytes=next
+   for(let i=0;i+3<bytes.length;i++)if(bytes[i]===13&&bytes[i+1]===10&&bytes[i+2]===13&&bytes[i+3]===10){end=i;break}
+   if(end<0&&bytes.length>=32768)throw Error('Response headers exceed 32 KiB')
+  }
+  const responseHeaderText=new TextDecoder('iso-8859-1').decode(bytes.subarray(0,end)),lines=responseHeaderText.split('\r\n'),status=/^HTTP\/1\.[01] ([2-5]\d\d)(?: (.*))?$/.exec(lines.shift())
+  if(!status)throw Error('Unsupported HTTP response status')
+  const responseHeaders=new Headers()
+  for(const line of lines){const at=line.indexOf(':');if(at<1)throw Error('Invalid HTTP response header');responseHeaders.append(line.slice(0,at),line.slice(at+1).trim())}
+  return {response:new Response(null,{status:Number(status[1]),statusText:status[2]??'',headers:responseHeaders}),connection,requestText,responseHeaderText,wireHeaders}
+ }finally{
+  writer?.releaseLock();reader?.releaseLock();signal.removeEventListener('abort',close);close()
+ }
+}
 function requestSummary(target,method,headers){
  const u=new URL(target)
  return {url:u.href,method,origin:u.origin,headers:Object.fromEntries(headers),cookieSent:headers.has('Cookie'),visibility:'fetch-input'}
@@ -29,7 +72,7 @@ function responseSummary(result){
  return {status:result.status,statusText:result.statusText,headers:Object.fromEntries(result.headers),setCookies:result.headers.getSetCookie?.()??[]}
 }
 const exposed='Content-Type, Content-Length, Content-Range, Accept-Ranges, ETag, Last-Modified, X-Upstream-URL, X-Proxy-Request-Id, X-Proxy-Upstream-Status, X-Proxy-Hop-Count, Server-Timing'
-export function createHandler(outbound=fetch) {
+export function createHandler(outbound=fetch,connectSocket) {
  return async function handle(request,env) {
   const url=new URL(request.url),origin=request.headers.get('Origin'),app=env.APP_ORIGIN||''
   const headers=new Headers({'Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff','Vary':'Origin'})
@@ -38,7 +81,7 @@ export function createHandler(outbound=fetch) {
   if(origin&&origin!==app)return reply('Origin is not allowed',403)
   if(request.method==='OPTIONS') {
    headers.set('Access-Control-Allow-Methods','GET, HEAD, OPTIONS')
-   headers.set('Access-Control-Allow-Headers','Authorization, Range, If-Range, If-None-Match, If-Modified-Since')
+   headers.set('Access-Control-Allow-Headers','Authorization, Range, If-Range, If-None-Match, If-Modified-Since, X-Proxy-Probe-Headers')
    headers.set('Access-Control-Max-Age','600');return reply(null,204)
   }
   if(!['GET','HEAD'].includes(request.method))return reply('Method is not allowed',405)
@@ -59,12 +102,16 @@ export function createHandler(outbound=fetch) {
   const started=debugging?Date.now():0,requestId=debugging?crypto.randomUUID():'',hops=debugging?[]:null
   const edge=debugging?{colo:request.cf?.colo??null,country:request.cf?.country??null}:null
   const json=(data,status=200)=>{headers.set('Content-Type','application/json');return reply(JSON.stringify(data),status)}
-  if(url.pathname==='/diagnostics')return json({service:'any-listen-personal-proxy',diagnosticsVersion:1,diagnosticsRevision:3,workerBuild,requestId,edge,capabilities:['on-demand-probe','range-probe','bilibili-request-profile','request-probe','head-probe','full-request-trace'],probeModes:['request','range','head'],defaultProbeMode:'range',observability:{redacted:false,responseHeaders:true,requestHeaders:'fetch-input',wireHeaders:false,egressIP:false,tlsFingerprint:false},storage:'none',automaticDiagnostics:false,limits:{redirects:4,probeTimeoutMs:8000},allowedHosts:hosts})
-  if(url.pathname==='/health'){headers.set('Content-Type','application/json');return reply(JSON.stringify({service:'any-listen-personal-proxy',version:1,diagnosticsVersion:1,diagnosticsRevision:3,workerBuild}))}
+  if(url.pathname==='/diagnostics')return json({service:'any-listen-personal-proxy',diagnosticsVersion:1,diagnosticsRevision:4,workerBuild,requestId,edge,capabilities:['on-demand-probe','range-probe','bilibili-request-profile','request-probe','head-probe','full-request-trace','probe-header-overrides','tls-socket-probe'],probeTransports:['fetch','tls-socket'],probeModes:['request','range','head'],defaultProbeMode:'range',observability:{redacted:false,responseHeaders:true,requestHeaders:'fetch-input',wireHeaders:false,egressIP:false,tlsFingerprint:false},storage:'none',automaticDiagnostics:false,limits:{redirects:4,probeTimeoutMs:8000,maxResponseHeadersBytes:32768,maxOverrideHeaders:32,maxOverrideBytes:16384},allowedHosts:hosts})
+  if(url.pathname==='/health'){headers.set('Content-Type','application/json');return reply(JSON.stringify({service:'any-listen-personal-proxy',version:1,diagnosticsVersion:1,diagnosticsRevision:4,workerBuild}))}
   const probing=url.pathname==='/probe',mode=url.searchParams.get('mode')||'range'
   if(probing&&!['request','range','head'].includes(mode))return json({service:'any-listen-personal-proxy',error:'unsupported_probe_mode',probeModes:['request','range','head']},400)
   if(!probing&&url.pathname!=='/proxy')return reply('Not found',404)
   let target=url.searchParams.get('url')||''
+  const transport=probing?(url.searchParams.get('transport')||'fetch'):'fetch'
+  if(!['fetch','tls-socket'].includes(transport))return json({error:'unsupported_probe_transport'},400)
+  let overrides=[];try{if(probing)overrides=diagnosticOverrides(request)}catch(error){return json({error:'invalid_probe_headers',message:String(error.message)},400)}
+  const initialOrigin=allowedTarget(target)?new URL(target).origin:null
   const controller=new AbortController(),cancel=()=>controller.abort(),timer=probing?setTimeout(()=>controller.abort(),8000):undefined
   request.signal.addEventListener('abort',cancel,{once:true});if(request.signal.aborted)cancel()
   const safeHeader=(result,name,pattern)=>{const value=result.headers.get(name);return value&&pattern.test(value)?value:null}
@@ -73,7 +120,7 @@ export function createHandler(outbound=fetch) {
    headers.set('X-Proxy-Request-Id',requestId);headers.set('X-Proxy-Hop-Count',String(hops.length))
    headers.set('Server-Timing',`proxy;dur=${Date.now()-started}`)
    if(result)headers.set('X-Proxy-Upstream-Status',String(result.status))
-   if(probing)return json({service:'any-listen-personal-proxy',diagnosticsVersion:1,diagnosticsRevision:3,workerBuild,requestId,edge,mode,cookieConfigured:Boolean(env.BILI_COOKIE),outcome,headersMs:Date.now()-started,hops,upstream:result?{status:result.status,contentType:safeHeader(result,'content-type',/^[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+(?:;[ a-zA-Z0-9=._-]+)?$/),contentLength:safeHeader(result,'content-length',/^\d{1,20}$/),contentRange:safeHeader(result,'content-range',/^bytes (?:\d+-\d+|\*)\/(?:\d+|\*)$/),acceptRanges:safeHeader(result,'accept-ranges',/^(bytes|none)$/),cacheStatus:safeHeader(result,'cf-cache-status',/^[A-Z_]{1,24}$/),ray:safeHeader(result,'cf-ray',/^[a-zA-Z0-9-]{1,80}$/)}:null},status)
+   if(probing)return json({service:'any-listen-personal-proxy',diagnosticsVersion:1,diagnosticsRevision:4,workerBuild,requestId,edge,mode,transport,headerOverrideCount:overrides.length,cookieConfigured:Boolean(env.BILI_COOKIE),outcome,headersMs:Date.now()-started,hops,upstream:result?{status:result.status,contentType:safeHeader(result,'content-type',/^[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+(?:;[ a-zA-Z0-9=._-]+)?$/),contentLength:safeHeader(result,'content-length',/^\d{1,20}$/),contentRange:safeHeader(result,'content-range',/^bytes (?:\d+-\d+|\*)\/(?:\d+|\*)$/),acceptRanges:safeHeader(result,'accept-ranges',/^(bytes|none)$/),cacheStatus:safeHeader(result,'cf-cache-status',/^[A-Z_]{1,24}$/),ray:safeHeader(result,'cf-ray',/^[a-zA-Z0-9-]{1,80}$/)}:null},status)
    return reply(message,status)
   }
   const upstreamHeaders=new Headers()
@@ -85,10 +132,15 @@ export function createHandler(outbound=fetch) {
     if(!allowedTarget(target))return finish('Target is not allowed',403,'target_rejected')
     // Only configured Bilibili headers are added. Caller cookies and auth are never forwarded.
     const requestHeaders=biliHeaders(target,env,upstreamHeaders)
+    if(probing&&new URL(target).origin===initialOrigin)for(const [name,value] of overrides){if(value===null)requestHeaders.delete(name);else requestHeaders.set(name,value)}
     const hopStart=debugging?Date.now():0,method=probing?(mode==='head'?'HEAD':'GET'):request.method
     const hop=debugging?{origin:new URL(target).origin,request:requestSummary(target,method,requestHeaders),status:null,headersMs:null}:null
     if(hop)hops.push(hop)
-    const result=await outbound(target,{method,headers:requestHeaders,redirect:'manual',signal:probing?controller.signal:request.signal})
+    let result
+    if(transport==='tls-socket'){
+     const raw=await probeHttpsSocket(target,method,requestHeaders,controller.signal,connectSocket);result=raw.response
+     Object.assign(hop,{transport,connection:raw.connection,requestText:raw.requestText,responseHeaderText:raw.responseHeaderText});hop.request=requestSummary(target,method,raw.wireHeaders);hop.request.visibility='socket-http1'
+    }else{result=await outbound(target,{method,headers:requestHeaders,redirect:'manual',signal:probing?controller.signal:request.signal});if(hop)hop.transport=transport}
     if(hop){hop.status=result.status;hop.headersMs=Date.now()-hopStart;hop.response=responseSummary(result);hop.redirect=[301,302,303,307,308].includes(result.status)}
     if([301,302,303,307,308].includes(result.status)) {
      const location=result.headers.get('Location');await result.body?.cancel()
