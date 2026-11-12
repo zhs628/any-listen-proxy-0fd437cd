@@ -5,7 +5,10 @@
   "workers_dev": true,
   "vars": {
     "APP_ORIGIN": "https://any-listen-browser-zhs.zhanghaosheng628.chatgpt.site",
-    "PROXY_KEY": "7e53e5a62a268f5981984c84c53200ac25a20af51293a5d09d7a1ea8a1369710"
+    "PROXY_KEY": "7e53e5a62a268f5981984c84c53200ac25a20af51293a5d09d7a1ea8a1369710",
+    "BILI_USER_AGENT": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "BILI_ORIGIN": "https://www.bilibili.com",
+    "BILI_REFERER": "https://www.bilibili.com/"
   },
   "observability": {
     "enabled": false

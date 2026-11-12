@@ -3,6 +3,23 @@ export const hosts = ['api.bilibili.com','b23.tv','bilibili.com','bilivideo.com'
 export function allowedTarget(value) {
   try { const u=new URL(value); return u.protocol==='https:'&&!u.username&&!u.password&&(!u.port||u.port==='443')&&hosts.some(h=>u.hostname===h||u.hostname.endsWith('.'+h)) } catch { return false }
 }
+const biliApiCookiePaths=new Set(['/x/web-interface/wbi/search/type','/x/web-interface/wbi/view','/x/space/wbi/arc/search','/x/polymer/web-space/seasons_series_list','/x/polymer/web-space/seasons_archives_list','/x/player/wbi/playurl','/x/series/series','/x/series/archives'])
+const defaultBiliUserAgent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+function biliSiteUrl(value,fallback,originOnly=false){
+ try{const u=new URL(value);if(u.protocol!=='https:'||!['www.bilibili.com','bilibili.com'].includes(u.hostname)||u.username||u.password||u.port||u.search||u.hash||(originOnly&&u.pathname!=='/'))return fallback;return originOnly?u.origin:u.href}catch{return fallback}
+}
+function biliHeaders(target,env,base){
+ const u=new URL(target),host=u.hostname,api=host==='api.bilibili.com',video=host==='bilivideo.com'||host.endsWith('.bilivideo.com')||host==='bilivideo.cn'||host.endsWith('.bilivideo.cn'),headers=new Headers(base)
+ if(!api&&!video)return headers
+ const agent=typeof env.BILI_USER_AGENT==='string'&&env.BILI_USER_AGENT.length>0&&env.BILI_USER_AGENT.length<=512&&!/[\r\n\0]/.test(env.BILI_USER_AGENT)?env.BILI_USER_AGENT:defaultBiliUserAgent
+ headers.set('User-Agent',agent);headers.set('Referer',biliSiteUrl(env.BILI_REFERER,'https://www.bilibili.com/'))
+ if(api){headers.set('Origin',biliSiteUrl(env.BILI_ORIGIN,'https://www.bilibili.com',true));headers.set('Accept','application/json, text/plain, */*')}
+ const cookie=env.BILI_COOKIE
+ const cookieAllowed=api&&biliApiCookiePaths.has(u.pathname)
+ if(cookieAllowed&&typeof cookie==='string'&&cookie.length<=4096&&!/[^\x20-\x7e]/.test(cookie)&&cookie.includes('='))headers.set('Cookie',cookie)
+ else headers.delete('Cookie')
+ return headers
+}
 const exposed='Content-Type, Content-Length, Content-Range, Accept-Ranges, ETag, Last-Modified, X-Upstream-URL, X-Proxy-Request-Id, X-Proxy-Upstream-Status, X-Proxy-Hop-Count, Server-Timing'
 export function createHandler(outbound=fetch) {
  return async function handle(request,env) {
@@ -34,7 +51,7 @@ export function createHandler(outbound=fetch) {
   const started=debugging?Date.now():0,requestId=debugging?crypto.randomUUID():'',hops=debugging?[]:null
   const edge=debugging?{colo:request.cf?.colo??null,country:request.cf?.country??null}:null
   const json=(data,status=200)=>{headers.set('Content-Type','application/json');return reply(JSON.stringify(data),status)}
-  if(url.pathname==='/diagnostics')return json({service:'any-listen-personal-proxy',diagnosticsVersion:1,requestId,edge,capabilities:['on-demand-probe','range-probe'],storage:'none',automaticDiagnostics:false,limits:{redirects:4,probeTimeoutMs:8000},allowedHosts:hosts})
+  if(url.pathname==='/diagnostics')return json({service:'any-listen-personal-proxy',diagnosticsVersion:1,requestId,edge,capabilities:['on-demand-probe','range-probe','bilibili-request-profile'],storage:'none',automaticDiagnostics:false,limits:{redirects:4,probeTimeoutMs:8000},allowedHosts:hosts})
   if(url.pathname==='/health'){headers.set('Content-Type','application/json');return reply(JSON.stringify({service:'any-listen-personal-proxy',version:1,diagnosticsVersion:1}))}
   const probing=url.pathname==='/probe'
   if(!probing&&url.pathname!=='/proxy')return reply('Not found',404)
@@ -56,12 +73,10 @@ export function createHandler(outbound=fetch) {
   try {
    for(let redirects=0;redirects<=4;redirects++) {
     if(!allowedTarget(target))return finish('Target is not allowed',403,'target_rejected')
-    // Fixed platform headers only. Never forward the caller's cookies or auth.
-    const host=new URL(target).hostname
-    upstreamHeaders.delete('Referer')
-    if(host==='api.bilibili.com'||host.endsWith('.bilivideo.com')||host.endsWith('.bilivideo.cn'))upstreamHeaders.set('Referer','https://www.bilibili.com/')
+    // Only configured Bilibili headers are added. Caller cookies and auth are never forwarded.
+    const requestHeaders=biliHeaders(target,env,upstreamHeaders)
     const hopStart=debugging?Date.now():0
-    const result=await outbound(target,{method:probing?'GET':request.method,headers:upstreamHeaders,redirect:'manual',signal:probing?controller.signal:request.signal})
+    const result=await outbound(target,{method:probing?'GET':request.method,headers:requestHeaders,redirect:'manual',signal:probing?controller.signal:request.signal})
     if(debugging)hops.push({origin:new URL(target).origin,status:result.status,headersMs:Date.now()-hopStart})
     if([301,302,303,307,308].includes(result.status)) {
      const location=result.headers.get('Location');await result.body?.cancel()
