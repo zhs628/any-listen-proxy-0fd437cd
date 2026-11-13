@@ -605,8 +605,8 @@ export function extraHosts(value){
  return String(value||'').split(/[\s,]+/).filter(h=>h.length<=253&&/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$/.test(h)&&!/(^|\.)(localhost|local|internal|home|lan|test|invalid)$/.test(h)).slice(0,128)
 }
 export function configuredTarget(value,env){return allowedTarget(value)}
-const transportCapabilities=['configurable-hosts','upstream-headers-v1','public-https-hosts']
-function transportInfo(env){return {protocolVersion:2,hostPolicy:'public-https',methods:['GET','HEAD'],capabilities:transportCapabilities,extraAllowedHosts:extraHosts(env.EXTRA_ALLOWED_HOSTS)}}
+const transportCapabilities=['configurable-hosts','upstream-headers-v1','public-https-hosts','post-body-v1']
+function transportInfo(env){return {protocolVersion:2,hostPolicy:'public-https',methods:['GET','HEAD','POST'],maxRequestBodyBytes:1048576,capabilities:transportCapabilities,extraAllowedHosts:extraHosts(env.EXTRA_ALLOWED_HOSTS)}}
 function forwardedHeaders(request){
  const raw=request.headers.get('X-Proxy-Upstream-Headers');if(!raw)return []
  if(raw.length>16384)throw Error('Upstream headers exceed 16 KiB')
@@ -639,8 +639,9 @@ function biliHeaders(target,env,base){
 const anonymousCookiePaths=new Set([...biliApiCookiePaths,'/x/web-interface/view','/x/web-interface/card'])
 export async function readBoundedBody(response,signal,limit){
  const reader=response.body?.getReader();if(!reader)return new Uint8Array()
+ const abort=()=>{void reader.cancel(signal.reason).catch(()=>{})};signal.addEventListener('abort',abort,{once:true})
  let length=0;const chunks=[]
- try{while(true){signal.throwIfAborted();const {value,done}=await reader.read();if(done)break;length+=value.length;if(length>limit)throw Error('Upstream response exceeds '+limit+' bytes');chunks.push(value)}}catch(error){await reader.cancel().catch(()=>{});throw error}finally{reader.releaseLock()}
+ try{while(true){signal.throwIfAborted();const {value,done}=await reader.read();signal.throwIfAborted();if(done)break;length+=value.length;if(length>limit)throw Error('Upstream response exceeds '+limit+' bytes');chunks.push(value)}}catch(error){await reader.cancel().catch(()=>{});throw error}finally{signal.removeEventListener('abort',abort);reader.releaseLock()}
  const body=new Uint8Array(length);let at=0;for(const part of chunks){body.set(part,at);at+=part.length}return body
 }
 export async function socketHttpFetch(target,init,connectOverride){
@@ -649,7 +650,7 @@ export async function socketHttpFetch(target,init,connectOverride){
  const socketConnect=address=>{if(address.port!==443||address.hostname!==new URL(target).hostname)throw Error('Socket destination mismatch');const socket=connect(address,{secureTransport:'on',allowHalfOpen:false});socket.closed?.catch(()=>{});return socket}
  return createFetcher({connect:()=>{throw Error('HTTPS required')},connectTls:socketConnect})(target,{...init,redirect:'manual'})
 }
-export const workerBuild='2026-11-14.2'
+export const workerBuild='2026-11-14.3'
 function diagnosticOverrides(request){
  const raw=request.headers.get('X-Proxy-Probe-Headers')
  if(!raw)return []
@@ -727,11 +728,11 @@ export function createHandler(outbound=fetch,connectSocket,socketTransport) {
   const reply=(body,status=200)=>new Response(body,{status,headers})
   if(origin&&origin!==app)return reply('Origin is not allowed',403)
   if(request.method==='OPTIONS') {
-   headers.set('Access-Control-Allow-Methods','GET, HEAD, OPTIONS')
-   headers.set('Access-Control-Allow-Headers','Authorization, Range, If-Range, If-None-Match, If-Modified-Since, X-Proxy-Probe-Headers, X-Spotify-Authorization, X-Proxy-Upstream-Headers')
+   headers.set('Access-Control-Allow-Methods','GET, HEAD, POST, OPTIONS')
+   headers.set('Access-Control-Allow-Headers','Authorization, Content-Type, Range, If-Range, If-None-Match, If-Modified-Since, X-Proxy-Probe-Headers, X-Spotify-Authorization, X-Proxy-Upstream-Headers')
    headers.set('Access-Control-Max-Age','600');return reply(null,204)
   }
-  if(!['GET','HEAD'].includes(request.method))return reply('Method is not allowed',405)
+  if(!['GET','HEAD','POST'].includes(request.method)||request.method==='POST'&&url.pathname!=='/proxy')return reply('Method is not allowed',405)
   if(url.pathname==='/'){
    if(!env.PROXY_KEY||!app)return reply('Proxy configuration incomplete',503)
    const signingKey=await crypto.subtle.importKey('raw',new TextEncoder().encode(env.PROXY_KEY),{name:'HMAC',hash:'SHA-256'},false,['sign'])
@@ -763,7 +764,7 @@ export function createHandler(outbound=fetch,connectSocket,socketTransport) {
   let overrides=[];try{if(probing)overrides=diagnosticOverrides(request)}catch(error){return json({error:'invalid_probe_headers',message:String(error.message)},400)}
   let forwarded=[];try{forwarded=forwardedHeaders(request)}catch(error){return json({error:'invalid_upstream_headers',message:error.message},400)}
   const initialOrigin=configuredTarget(target,env)?new URL(target).origin:null
-  const controller=new AbortController(),cancel=()=>controller.abort(),timer=probing||apiRequest?setTimeout(()=>controller.abort(),probing?8000:15000):undefined
+  const controller=new AbortController(),cancel=()=>controller.abort(),timer=probing||apiRequest||request.method==='POST'?setTimeout(()=>controller.abort(),probing?8000:15000):undefined
   request.signal.addEventListener('abort',cancel,{once:true});if(request.signal.aborted)cancel()
   const safeHeader=(result,name,pattern)=>{const value=result.headers.get(name);return value&&pattern.test(value)?value:null}
   const finish=(message,status,outcome='complete',result)=>{
@@ -778,7 +779,13 @@ export function createHandler(outbound=fetch,connectSocket,socketTransport) {
   for(const name of ['Range','If-Range','If-None-Match','If-Modified-Since'])if(request.headers.has(name))upstreamHeaders.set(name,request.headers.get(name))
   if(probing&&mode==='range')upstreamHeaders.set('Range','bytes=0-0')
   if(probing&&mode==='head')upstreamHeaders.delete('Range')
+  let method=probing?(mode==='head'?'HEAD':'GET'):request.method,body
   try {
+   if(!configuredTarget(target,env))return finish('Target is not allowed',403,'target_rejected')
+   if(method==='POST'){
+    try{body=await readBoundedBody(request,controller.signal,1048576)}catch(error){if(controller.signal.aborted||request.signal.aborted)throw error;return finish('Request body exceeds 1 MiB',413,'request_too_large')}
+    if(request.headers.has('Content-Type'))upstreamHeaders.set('Content-Type',request.headers.get('Content-Type'))
+   }
    for(let redirects=0;redirects<=4;redirects++) {
     if(!configuredTarget(target,env))return finish('Target is not allowed',403,'target_rejected')
     // Only configured Bilibili headers are added. Caller cookies and auth are never forwarded.
@@ -790,12 +797,13 @@ export function createHandler(outbound=fetch,connectSocket,socketTransport) {
      requestHeaders.set('app-platform','WebPlayer')
     }
     if(probing&&new URL(target).origin===initialOrigin)for(const [name,value] of overrides){if(value===null)requestHeaders.delete(name);else requestHeaders.set(name,value)}
-    const productionTls=transport==='production'&&new URL(target).hostname==='api.bilibili.com'&&env.BILI_API_TRANSPORT!=='fetch'
+    if(method!=='POST'&&request.method==='POST')requestHeaders.delete('Content-Type')
+    const productionTls=method!=='POST'&&transport==='production'&&new URL(target).hostname==='api.bilibili.com'&&env.BILI_API_TRANSPORT!=='fetch'
     if(productionTls){
      if(anonymousCookiePaths.has(new URL(target).pathname)&&!requestHeaders.has('Cookie')&&!overrides.some(([name])=>name.toLowerCase()==='cookie'))requestHeaders.set('Cookie',await anonymousDevice(env,controller.signal,dependencies))
      requestHeaders.set('Accept-Encoding','identity')
     }
-    const hopStart=debugging?Date.now():0,method=probing?(mode==='head'?'HEAD':'GET'):request.method
+    const hopStart=debugging?Date.now():0
     const hop=debugging?{origin:new URL(target).origin,request:requestSummary(target,method,requestHeaders),status:null,headersMs:null}:null
     if(hop)hops.push(hop)
     let result
@@ -804,12 +812,17 @@ export function createHandler(outbound=fetch,connectSocket,socketTransport) {
     }else if(transport==='tls-socket'){
      const raw=await probeHttpsSocket(target,method,requestHeaders,controller.signal,connectSocket);result=raw.response
      Object.assign(hop,{transport,connection:raw.connection,requestText:raw.requestText,responseHeaderText:raw.responseHeaderText});hop.request=requestSummary(target,method,raw.wireHeaders);hop.request.visibility='socket-http1'
-    }else{result=await outbound(target,{method,headers:requestHeaders,redirect:'manual',signal:probing?controller.signal:request.signal});if(hop)hop.transport=transport}
+    }else{result=await outbound(target,{method,headers:requestHeaders,...(method==='POST'?{body}:{}),redirect:'manual',signal:probing||request.method==='POST'?controller.signal:request.signal});if(hop)hop.transport=transport}
     if(hop){hop.status=result.status;hop.headersMs=Date.now()-hopStart;hop.response=responseSummary(result);hop.redirect=[301,302,303,307,308].includes(result.status)}
     if([301,302,303,307,308].includes(result.status)) {
      const location=result.headers.get('Location');await result.body?.cancel()
      if(!location)return finish('Invalid upstream redirect',502,'invalid_redirect')
-     target=new URL(location,target).href;continue
+     const next=new URL(location,target)
+     if(method==='POST'){
+      if([301,302,303].includes(result.status)){method='GET';body=undefined}
+      else if(next.origin!==new URL(target).origin)return finish('Cross-origin POST redirect is not allowed',403,'post_redirect_rejected')
+     }
+     target=next.href;continue
     }
     if(probing){await result.body?.cancel();return finish(null,200,result.status>=400?'upstream_rejected':'complete',result)}
     if(productionTls&&request.method!=='HEAD'){

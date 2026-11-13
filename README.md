@@ -28,17 +28,17 @@ GET /diagnostics 返回 workerBuild、诊断协议版本、能力和节点信息
 
 ## 通用代理协议 v2
 
-GET/HEAD 与 Range 流式响应保持兼容。`/health` 返回 protocolVersion、methods、capabilities、extraAllowedHosts；App 在测试连接成功时读取，按代理地址与密钥隔离保存。修改配置后请在 App 再次测试连接。旧版代理仍沿用已有转发方式。
+GET/HEAD/POST 与 Range 流式响应保持兼容。`/health` 返回 protocolVersion、methods、capabilities、extraAllowedHosts；App 在测试连接成功时读取，按代理地址与密钥隔离保存。修改配置后请在 App 再次测试连接。旧版代理仍沿用已有转发方式。
 
 默认允许所有公网 HTTPS 域名，无需配置 EXTRA_ALLOWED_HOSTS 或逐个添加音源/CDN。health 返回 hostPolicy=public-https 和 public-https-hosts 能力。仅接受标准 HTTPS 443、有效域名，不接受 IP 字面量、本机和内网保留域名、URL 用户名密码。每次重定向重新检查地址；跨源时清除上游鉴权及自定义请求头。个人代理仍需连接密钥。旧 EXTRA_ALLOWED_HOSTS 变量无需删除，但不再限制范围。
 
 支持通过 X-Proxy-Upstream-Headers JSON 传入最多 32 项、16 KiB 的上游请求头，包括 Authorization、Referer、Origin、Accept 和平台自定义头；它与个人代理连接密钥独立。Cookie 和连接控制头不接受，跨源重定向丢弃整组头；每次跳转重新检查目标规则。上游 Authorization 在诊断摘要中隐藏。普通请求不自动执行诊断。
 
-此协议不承诺 POST、WebSocket、DRM 或特殊签名协议通用支持。新增这类传输能力仍可能需要更新 Worker；平台业务解析和签名优先留在 App。
+支持 POST 转发：JSON、表单及二进制请求体上限 1 MiB，Content-Type 保持一致；仅 /proxy 接受 POST，连接密钥仍独立验证。POST 在 App 中直接走代理，不先直连、不自动重试。301/302/303 跳转转为 GET 并丢弃请求体；307/308 仅允许同源跳转，防止把请求体提交到其他站点。health 返回 post-body-v1 能力、POST 方法和请求体上限。现有 GET/HEAD/Range 保持流式响应。此协议不承诺 WebSocket、DRM 或特殊签名协议通用支持。新增这类传输能力仍可能需要更新 Worker；平台业务解析和签名优先留在 App。
 
 
 ## 转发范围
 
-支持所有公网 HTTPS 域名的请求，逐次验证重定向，不转发调用方 Cookie 或授权。可选的 BILI_COOKIE 只用于精确列出的 B 站 API 路径；不会发往视频 CDN，也不会跟随重定向泄漏到其他主机。支持 GET、HEAD、OPTIONS 和流式 Range 响应。平台限制、网络条件和 Cloudflare 免费额度仍适用。默认关闭日志采集及响应缓存。
+支持所有公网 HTTPS 域名的请求，逐次验证重定向，不转发调用方 Cookie 或授权。可选的 BILI_COOKIE 只用于精确列出的 B 站 API 路径；不会发往视频 CDN，也不会跟随重定向泄漏到其他主机。支持 GET、HEAD、POST、OPTIONS 和流式 Range 响应。平台限制、网络条件和 Cloudflare 免费额度仍适用。默认关闭日志采集及响应缓存。
 
 B 站 API 正式转发总时限 15 秒、响应正文上限 2 MiB；诊断总时限 8 秒。Worker 内嵌 MIT 许可的 PeronGH/socket-fetch 固定版本，完整许可保留在 worker.mjs 中。代码许可见 LICENSE。
