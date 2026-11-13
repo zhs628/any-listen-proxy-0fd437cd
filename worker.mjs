@@ -592,20 +592,21 @@ export {
 };
 // END SOCKET-FETCH VENDOR
 // Personal music proxy. No account-management credentials are needed at runtime.
-export const hosts = ['api.bilibili.com','b23.tv','bilibili.com','bilivideo.com','bilivideo.cn','hdslb.com','music.126.net','music.163.com','126.net','y.qq.com','qqmusic.qq.com','gtimg.cn','kuwo.cn','kwcdn.kuwo.cn','music-api.gdstudio.xyz','oiapi.net','api.xunhuisi.store','www.cyanyun.com','h.miti.cc.cd','open.spotify.com','api-partner.spotify.com']
+// Public HTTPS domain names are accepted without a per-provider allowlist.
+export const hosts = ['*']
 export function allowedTarget(value) {
-  try { const u=new URL(value); return u.protocol==='https:'&&!u.username&&!u.password&&(!u.port||u.port==='443')&&(hosts.some(h=>u.hostname===h||u.hostname.endsWith('.'+h))||(u.hostname==='raw.githubusercontent.com'&&u.pathname==='/xyloflake/spot-secrets-go/refs/heads/main/secrets/secretDict.json')) } catch { return false }
+ try {
+  const u=new URL(value),host=u.hostname
+  return u.protocol==='https:'&&!u.username&&!u.password&&(!u.port||u.port==='443')&&host.length<=253&&/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$/.test(host)&&!/(^|\.)(localhost|local|internal|home|lan|test|invalid|onion|arpa)$/.test(host)&&!/(^|\.)(metadata\.google\.internal|metadata\.goog|instance-data\.ec2\.internal)$/.test(host)
+ }catch{return false}
 }
 // Operator-configured additions need no Worker source changes. Never allow IP/local destinations.
 export function extraHosts(value){
  return String(value||'').split(/[\s,]+/).filter(h=>h.length<=253&&/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$/.test(h)&&!/(^|\.)(localhost|local|internal|home|lan|test|invalid)$/.test(h)).slice(0,128)
 }
-export function configuredTarget(value,env){
- if(allowedTarget(value))return true
- try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password&&!u.port&&extraHosts(env.EXTRA_ALLOWED_HOSTS).includes(u.hostname)}catch{return false}
-}
-const transportCapabilities=['configurable-hosts','upstream-headers-v1']
-function transportInfo(env){return {protocolVersion:2,methods:['GET','HEAD'],capabilities:transportCapabilities,extraAllowedHosts:extraHosts(env.EXTRA_ALLOWED_HOSTS)}}
+export function configuredTarget(value,env){return allowedTarget(value)}
+const transportCapabilities=['configurable-hosts','upstream-headers-v1','public-https-hosts']
+function transportInfo(env){return {protocolVersion:2,hostPolicy:'public-https',methods:['GET','HEAD'],capabilities:transportCapabilities,extraAllowedHosts:extraHosts(env.EXTRA_ALLOWED_HOSTS)}}
 function forwardedHeaders(request){
  const raw=request.headers.get('X-Proxy-Upstream-Headers');if(!raw)return []
  if(raw.length>16384)throw Error('Upstream headers exceed 16 KiB')
@@ -648,7 +649,7 @@ export async function socketHttpFetch(target,init,connectOverride){
  const socketConnect=address=>{if(address.port!==443||address.hostname!==new URL(target).hostname)throw Error('Socket destination mismatch');const socket=connect(address,{secureTransport:'on',allowHalfOpen:false});socket.closed?.catch(()=>{});return socket}
  return createFetcher({connect:()=>{throw Error('HTTPS required')},connectTls:socketConnect})(target,{...init,redirect:'manual'})
 }
-export const workerBuild='2026-11-14.1'
+export const workerBuild='2026-11-14.2'
 function diagnosticOverrides(request){
  const raw=request.headers.get('X-Proxy-Probe-Headers')
  if(!raw)return []

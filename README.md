@@ -30,7 +30,7 @@ GET /diagnostics 返回 workerBuild、诊断协议版本、能力和节点信息
 
 GET/HEAD 与 Range 流式响应保持兼容。`/health` 返回 protocolVersion、methods、capabilities、extraAllowedHosts；App 在测试连接成功时读取，按代理地址与密钥隔离保存。修改配置后请在 App 再次测试连接。旧版代理仍沿用已有转发方式。
 
-新增元数据或 CDN 域名时，在 Cloudflare 的 Variables and Secrets 中设置 EXTRA_ALLOWED_HOSTS（逗号分隔、精确主机名，不含协议或路径），保存配置生效后无需上传新的 Worker 源码。默认列表仍有效；额外域名不会隐式放行子域，不接受 IP、本地地址或通配符。仅添加你信任的公开站点。Cloudflare 保存变量可能触发平台部署，但无需重新下载工程。
+默认允许所有公网 HTTPS 域名，无需配置 EXTRA_ALLOWED_HOSTS 或逐个添加音源/CDN。health 返回 hostPolicy=public-https 和 public-https-hosts 能力。仅接受标准 HTTPS 443、有效域名，不接受 IP 字面量、本机和内网保留域名、URL 用户名密码。每次重定向重新检查地址；跨源时清除上游鉴权及自定义请求头。个人代理仍需连接密钥。旧 EXTRA_ALLOWED_HOSTS 变量无需删除，但不再限制范围。
 
 支持通过 X-Proxy-Upstream-Headers JSON 传入最多 32 项、16 KiB 的上游请求头，包括 Authorization、Referer、Origin、Accept 和平台自定义头；它与个人代理连接密钥独立。Cookie 和连接控制头不接受，跨源重定向丢弃整组头；每次跳转重新检查目标规则。上游 Authorization 在诊断摘要中隐藏。普通请求不自动执行诊断。
 
@@ -39,6 +39,6 @@ GET/HEAD 与 Range 流式响应保持兼容。`/health` 返回 protocolVersion�
 
 ## 转发范围
 
-仅支持允许列表中的 HTTPS 请求，逐次验证重定向，不转发调用方 Cookie 或授权。可选的 BILI_COOKIE 只用于精确列出的 B 站 API 路径；不会发往视频 CDN，也不会跟随重定向泄漏到其他主机。支持 GET、HEAD、OPTIONS 和流式 Range 响应。平台限制、网络条件和 Cloudflare 免费额度仍适用。默认关闭日志采集及响应缓存。
+支持所有公网 HTTPS 域名的请求，逐次验证重定向，不转发调用方 Cookie 或授权。可选的 BILI_COOKIE 只用于精确列出的 B 站 API 路径；不会发往视频 CDN，也不会跟随重定向泄漏到其他主机。支持 GET、HEAD、OPTIONS 和流式 Range 响应。平台限制、网络条件和 Cloudflare 免费额度仍适用。默认关闭日志采集及响应缓存。
 
 B 站 API 正式转发总时限 15 秒、响应正文上限 2 MiB；诊断总时限 8 秒。Worker 内嵌 MIT 许可的 PeronGH/socket-fetch 固定版本，完整许可保留在 worker.mjs 中。代码许可见 LICENSE。
