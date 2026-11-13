@@ -24,6 +24,19 @@
 
 GET /diagnostics 返回 workerBuild、诊断协议版本、能力和节点信息。GET /probe?url=…&mode=request|range|head 分别执行普通 GET、首字节 Range 或 HEAD（默认 range 兼容旧客户端）。返回逐跳完整 URL、完整出站请求头（含 Cookie）、响应头（含 Set-Cookie）、上游状态和耗时，取得响应头后取消正文。HTTP 200 仅表示报告可读取，应以 outcome 和 upstream.status 判断上游结果。transport=production 使用正式转发路径并报告匿名设备请求或内存命中；transport=fetch 可作标准通道对照。可选 transport=tls-socket 在相同 Worker 上作实验性 TLS/HTTP1 响应头对照，限制 443 端口和 32 KiB 响应头，不用于日常转发。X-Proxy-Probe-Headers 接受最多 32 项、16 KiB 的 JSON 请求头覆盖（null 删除），仅本次诊断及初始同源跳转生效；Host 和消息长度等连接控制头不能覆盖。Fetch 请求记录只代表 fetch 输入，无法观察 Cloudflare 最终线上头、出口 IP 或 TLS。Socket 更换传输可能同时改变出口、HTTP 版本与 TLS 特征，不能仅凭状态差异断言某个头触发拦截。接口使用相同的连接密钥保护。普通转发不生成诊断编号、不采集耗时、不触发额外诊断；只有主动诊断请求返回编号和耗时。诊断不保存到云端数据库；报告包含完整上游 URL、请求头和响应头，目标响应正文不读取；production 可能读取匿名设备接口的必要 JSON，但不会把正文加入报告。客户端仅保留当前会话最近 50 条记录，可在设置中导出。
 
+
+
+## 通用代理协议 v2
+
+GET/HEAD 与 Range 流式响应保持兼容。`/health` 返回 protocolVersion、methods、capabilities、extraAllowedHosts；App 在测试连接成功时读取，按代理地址与密钥隔离保存。修改配置后请在 App 再次测试连接。旧版代理仍沿用已有转发方式。
+
+新增元数据或 CDN 域名时，在 Cloudflare 的 Variables and Secrets 中设置 EXTRA_ALLOWED_HOSTS（逗号分隔、精确主机名，不含协议或路径），保存配置生效后无需上传新的 Worker 源码。默认列表仍有效；额外域名不会隐式放行子域，不接受 IP、本地地址或通配符。仅添加你信任的公开站点。Cloudflare 保存变量可能触发平台部署，但无需重新下载工程。
+
+支持通过 X-Proxy-Upstream-Headers JSON 传入最多 32 项、16 KiB 的上游请求头，包括 Authorization、Referer、Origin、Accept 和平台自定义头；它与个人代理连接密钥独立。Cookie 和连接控制头不接受，跨源重定向丢弃整组头；每次跳转重新检查目标规则。上游 Authorization 在诊断摘要中隐藏。普通请求不自动执行诊断。
+
+此协议不承诺 POST、WebSocket、DRM 或特殊签名协议通用支持。新增这类传输能力仍可能需要更新 Worker；平台业务解析和签名优先留在 App。
+
+
 ## 转发范围
 
 仅支持允许列表中的 HTTPS 请求，逐次验证重定向，不转发调用方 Cookie 或授权。可选的 BILI_COOKIE 只用于精确列出的 B 站 API 路径；不会发往视频 CDN，也不会跟随重定向泄漏到其他主机。支持 GET、HEAD、OPTIONS 和流式 Range 响应。平台限制、网络条件和 Cloudflare 免费额度仍适用。默认关闭日志采集及响应缓存。

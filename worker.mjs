@@ -592,9 +592,30 @@ export {
 };
 // END SOCKET-FETCH VENDOR
 // Personal music proxy. No account-management credentials are needed at runtime.
-export const hosts = ['api.bilibili.com','b23.tv','bilibili.com','bilivideo.com','bilivideo.cn','hdslb.com','music.126.net','music.163.com','126.net','y.qq.com','qqmusic.qq.com','gtimg.cn','kuwo.cn','kwcdn.kuwo.cn','music-api.gdstudio.xyz','oiapi.net','api.xunhuisi.store','www.cyanyun.com','h.miti.cc.cd']
+export const hosts = ['api.bilibili.com','b23.tv','bilibili.com','bilivideo.com','bilivideo.cn','hdslb.com','music.126.net','music.163.com','126.net','y.qq.com','qqmusic.qq.com','gtimg.cn','kuwo.cn','kwcdn.kuwo.cn','music-api.gdstudio.xyz','oiapi.net','api.xunhuisi.store','www.cyanyun.com','h.miti.cc.cd','open.spotify.com','api-partner.spotify.com']
 export function allowedTarget(value) {
-  try { const u=new URL(value); return u.protocol==='https:'&&!u.username&&!u.password&&(!u.port||u.port==='443')&&hosts.some(h=>u.hostname===h||u.hostname.endsWith('.'+h)) } catch { return false }
+  try { const u=new URL(value); return u.protocol==='https:'&&!u.username&&!u.password&&(!u.port||u.port==='443')&&(hosts.some(h=>u.hostname===h||u.hostname.endsWith('.'+h))||(u.hostname==='raw.githubusercontent.com'&&u.pathname==='/xyloflake/spot-secrets-go/refs/heads/main/secrets/secretDict.json')) } catch { return false }
+}
+// Operator-configured additions need no Worker source changes. Never allow IP/local destinations.
+export function extraHosts(value){
+ return String(value||'').split(/[\s,]+/).filter(h=>h.length<=253&&/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,63}$/.test(h)&&!/(^|\.)(localhost|local|internal|home|lan|test|invalid)$/.test(h)).slice(0,128)
+}
+export function configuredTarget(value,env){
+ if(allowedTarget(value))return true
+ try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password&&!u.port&&extraHosts(env.EXTRA_ALLOWED_HOSTS).includes(u.hostname)}catch{return false}
+}
+const transportCapabilities=['configurable-hosts','upstream-headers-v1']
+function transportInfo(env){return {protocolVersion:2,methods:['GET','HEAD'],capabilities:transportCapabilities,extraAllowedHosts:extraHosts(env.EXTRA_ALLOWED_HOSTS)}}
+function forwardedHeaders(request){
+ const raw=request.headers.get('X-Proxy-Upstream-Headers');if(!raw)return []
+ if(raw.length>16384)throw Error('Upstream headers exceed 16 KiB')
+ const values=JSON.parse(raw)
+ if(!values||Array.isArray(values)||typeof values!=='object'||Object.keys(values).length>32)throw Error('Expected at most 32 upstream headers')
+ return Object.entries(values).map(([name,value])=>{
+  if(!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)||/^(host|cookie|set-cookie|content-length|transfer-encoding|connection|upgrade|proxy-.*|trailer|te|cf-.*|x-forwarded-.*)$/i.test(name))throw Error('Unsupported upstream header')
+  if(typeof value!=='string'||/[^\x20-\x7e]/.test(value))throw Error('Invalid upstream header value')
+  return [name,value]
+ })
 }
 const biliApiCookiePaths=new Set(['/x/web-interface/wbi/search/type','/x/web-interface/wbi/view','/x/space/wbi/arc/search','/x/polymer/web-space/seasons_series_list','/x/polymer/web-space/seasons_archives_list','/x/player/wbi/playurl','/x/series/series','/x/series/archives'])
 const defaultBiliUserAgent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -627,7 +648,7 @@ export async function socketHttpFetch(target,init,connectOverride){
  const socketConnect=address=>{if(address.port!==443||address.hostname!==new URL(target).hostname)throw Error('Socket destination mismatch');const socket=connect(address,{secureTransport:'on',allowHalfOpen:false});socket.closed?.catch(()=>{});return socket}
  return createFetcher({connect:()=>{throw Error('HTTPS required')},connectTls:socketConnect})(target,{...init,redirect:'manual'})
 }
-export const workerBuild='2026-11-12.5'
+export const workerBuild='2026-11-14.1'
 function diagnosticOverrides(request){
  const raw=request.headers.get('X-Proxy-Probe-Headers')
  if(!raw)return []
@@ -673,7 +694,9 @@ export async function probeHttpsSocket(target,method,headers,signal,connectOverr
 }
 function requestSummary(target,method,headers){
  const u=new URL(target)
- return {url:u.href,method,origin:u.origin,headers:Object.fromEntries(headers),cookieSent:headers.has('Cookie'),visibility:'fetch-input'}
+ const visibleHeaders=Object.fromEntries(headers)
+ if(headers.has('Authorization'))visibleHeaders.authorization='[redacted]'
+ return {url:u.href,method,origin:u.origin,headers:visibleHeaders,cookieSent:headers.has('Cookie'),visibility:'fetch-input'}
 }
 function responseSummary(result){
  return {status:result.status,statusText:result.statusText,headers:Object.fromEntries(result.headers),setCookies:result.headers.getSetCookie?.()??[]}
@@ -704,7 +727,7 @@ export function createHandler(outbound=fetch,connectSocket,socketTransport) {
   if(origin&&origin!==app)return reply('Origin is not allowed',403)
   if(request.method==='OPTIONS') {
    headers.set('Access-Control-Allow-Methods','GET, HEAD, OPTIONS')
-   headers.set('Access-Control-Allow-Headers','Authorization, Range, If-Range, If-None-Match, If-Modified-Since, X-Proxy-Probe-Headers')
+   headers.set('Access-Control-Allow-Headers','Authorization, Range, If-Range, If-None-Match, If-Modified-Since, X-Proxy-Probe-Headers, X-Spotify-Authorization, X-Proxy-Upstream-Headers')
    headers.set('Access-Control-Max-Age','600');return reply(null,204)
   }
   if(!['GET','HEAD'].includes(request.method))return reply('Method is not allowed',405)
@@ -725,8 +748,8 @@ export function createHandler(outbound=fetch,connectSocket,socketTransport) {
   const started=debugging?Date.now():0,requestId=debugging?crypto.randomUUID():'',hops=debugging?[]:null
   const edge=debugging?{colo:request.cf?.colo??null,country:request.cf?.country??null}:null
   const json=(data,status=200)=>{headers.set('Content-Type','application/json');return reply(JSON.stringify(data),status)}
-  if(url.pathname==='/diagnostics')return json({service:'any-listen-personal-proxy',diagnosticsVersion:1,diagnosticsRevision:5,workerBuild,requestId,edge,capabilities:['on-demand-probe','range-probe','bilibili-request-profile','request-probe','head-probe','full-request-trace','probe-header-overrides','tls-socket-probe','bilibili-api-tls','anonymous-device-cookie'],probeTransports:['production','fetch','tls-socket'],probeModes:['request','range','head'],defaultProbeMode:'range',observability:{redacted:false,responseHeaders:true,requestHeaders:'fetch-input',wireHeaders:false,egressIP:false,tlsFingerprint:false},storage:'none',automaticDiagnostics:false,limits:{redirects:4,probeTimeoutMs:8000,maxResponseHeadersBytes:32768,maxOverrideHeaders:32,maxOverrideBytes:16384,productionApiTimeoutMs:15000,productionApiMaxBodyBytes:2097152,productionApiMaxHeadersBytes:65536,anonymousCookieTtlMs:1800000},allowedHosts:hosts})
-  if(url.pathname==='/health'){headers.set('Content-Type','application/json');return reply(JSON.stringify({service:'any-listen-personal-proxy',version:1,diagnosticsVersion:1,diagnosticsRevision:5,workerBuild}))}
+  if(url.pathname==='/diagnostics')return json({service:'any-listen-personal-proxy',diagnosticsVersion:1,diagnosticsRevision:5,workerBuild,transport:transportInfo(env),requestId,edge,capabilities:['on-demand-probe','range-probe','bilibili-request-profile','request-probe','head-probe','full-request-trace','probe-header-overrides','tls-socket-probe','bilibili-api-tls','anonymous-device-cookie','spotify-metadata'],probeTransports:['production','fetch','tls-socket'],probeModes:['request','range','head'],defaultProbeMode:'range',observability:{redacted:false,responseHeaders:true,requestHeaders:'fetch-input',wireHeaders:false,egressIP:false,tlsFingerprint:false},storage:'none',automaticDiagnostics:false,limits:{redirects:4,probeTimeoutMs:8000,maxResponseHeadersBytes:32768,maxOverrideHeaders:32,maxOverrideBytes:16384,productionApiTimeoutMs:15000,productionApiMaxBodyBytes:2097152,productionApiMaxHeadersBytes:65536,anonymousCookieTtlMs:1800000},allowedHosts:hosts})
+  if(url.pathname==='/health'){headers.set('Content-Type','application/json');return reply(JSON.stringify({service:'any-listen-personal-proxy',version:1,diagnosticsVersion:1,diagnosticsRevision:5,workerBuild,...transportInfo(env)}))}
   const probing=url.pathname==='/probe',mode=url.searchParams.get('mode')||'range'
   if(probing&&!['request','range','head'].includes(mode))return json({service:'any-listen-personal-proxy',error:'unsupported_probe_mode',probeModes:['request','range','head']},400)
   if(!probing&&url.pathname!=='/proxy')return reply('Not found',404)
@@ -737,7 +760,8 @@ export function createHandler(outbound=fetch,connectSocket,socketTransport) {
   let failure=null
   if(!['production','fetch','tls-socket'].includes(transport))return json({error:'unsupported_probe_transport'},400)
   let overrides=[];try{if(probing)overrides=diagnosticOverrides(request)}catch(error){return json({error:'invalid_probe_headers',message:String(error.message)},400)}
-  const initialOrigin=allowedTarget(target)?new URL(target).origin:null
+  let forwarded=[];try{forwarded=forwardedHeaders(request)}catch(error){return json({error:'invalid_upstream_headers',message:error.message},400)}
+  const initialOrigin=configuredTarget(target,env)?new URL(target).origin:null
   const controller=new AbortController(),cancel=()=>controller.abort(),timer=probing||apiRequest?setTimeout(()=>controller.abort(),probing?8000:15000):undefined
   request.signal.addEventListener('abort',cancel,{once:true});if(request.signal.aborted)cancel()
   const safeHeader=(result,name,pattern)=>{const value=result.headers.get(name);return value&&pattern.test(value)?value:null}
@@ -755,9 +779,15 @@ export function createHandler(outbound=fetch,connectSocket,socketTransport) {
   if(probing&&mode==='head')upstreamHeaders.delete('Range')
   try {
    for(let redirects=0;redirects<=4;redirects++) {
-    if(!allowedTarget(target))return finish('Target is not allowed',403,'target_rejected')
+    if(!configuredTarget(target,env))return finish('Target is not allowed',403,'target_rejected')
     // Only configured Bilibili headers are added. Caller cookies and auth are never forwarded.
     const requestHeaders=biliHeaders(target,env,upstreamHeaders)
+    if(new URL(target).origin===initialOrigin)for(const [name,value] of forwarded)requestHeaders.set(name,value)
+    if(new URL(target).origin===initialOrigin&&new URL(target).hostname==='api-partner.spotify.com'){
+     const spotifyAuth=request.headers.get('X-Spotify-Authorization')
+     if(spotifyAuth&&/^Bearer [A-Za-z0-9._~+\/=-]{1,4096}$/.test(spotifyAuth))requestHeaders.set('Authorization',spotifyAuth)
+     requestHeaders.set('app-platform','WebPlayer')
+    }
     if(probing&&new URL(target).origin===initialOrigin)for(const [name,value] of overrides){if(value===null)requestHeaders.delete(name);else requestHeaders.set(name,value)}
     const productionTls=transport==='production'&&new URL(target).hostname==='api.bilibili.com'&&env.BILI_API_TRANSPORT!=='fetch'
     if(productionTls){
