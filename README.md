@@ -6,7 +6,7 @@
 
 本版本新增 Browser Run 与 YouTubeSession Durable Object。更新时上传 worker.mjs、package.json 和 wrangler.jsonc；保留原服务名称和连接密钥，等待 Git 构建完成。Wrangler 会声明 BROWSER 与 YOUTUBE_SESSION 绑定及 SQLite 迁移。如账户提示未启用 Browser Run，请在 Cloudflare 控制台启用后重新部署；不要自动升级付费套餐。免费浏览器时长有限，超额时功能会明确失败。
 
-部署后在 App 的个人代理页面连接 YouTube。登录在 Cloudflare 托管浏览器中的 YouTube 官方页面完成；密码不经过 App。只保存 youtube.com 的会话 Cookie，使用连接密钥派生的 AES-GCM 密钥加密存入你自己的 Durable Object。密钥变更后需要重新登录。点击断开连接会删除保存的会话。登录不保证音轨一定可用，必须单独执行音频读取检查。
+部署后在 App 的个人代理页面点击登录 YouTube，云端浏览器会直接打开；返回 App 后自动确认登录状态。会话管理修复版本为 2026-11-16.2，已接入 Browser Run 的旧工程只需覆盖 worker.mjs，不新增绑定。登录在 Cloudflare 托管浏览器中的 YouTube 官方页面完成。原始页面直接接收输入；可选的本机输入面板通过临时加密 WebSocket 向你自己的云端会话发送文字，发送后清空本机输入，不存储密码或加入诊断。只保存 youtube.com 的会话 Cookie，使用连接密钥派生的 AES-GCM 密钥加密存入你自己的 Durable Object。密钥变更后需要重新登录。点击断开连接会删除保存的会话。登录不保证音轨一定可用，必须单独执行音频读取检查。
 
 ## 首次部署
 

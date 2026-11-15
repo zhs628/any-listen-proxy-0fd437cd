@@ -14,29 +14,55 @@ export class YouTubeSession {
  fetch(request){const work=()=>this.handle(request).catch(e=>e instanceof SessionError?ytJSON({error:e.code,message:e.message},e.status):ytJSON({error:'browser_operation_failed',message:/limit|quota|429/i.test(String(e?.message))?'云端浏览器额度或并发已达到限制，请稍后重试':'云端浏览器操作未完成，请重新连接；Google 可能拒绝此浏览器'},502));const result=this.serial.then(work,work);this.serial=result.then(()=>{},()=>{});return result}
  async stored(){const state=await this.ctx.storage.get('session');if(!state)return null;try{return await openSession(state,this.env.PROXY_KEY)}catch{ytFail('session_key_changed','连接密钥已变更，请断开并重新登录')}}
  async save(value){await this.ctx.storage.put('session',await sealSession(value,this.env.PROXY_KEY))}
+ async connectBrowser(id){
+  const driver=await this.driver()
+  for(let attempt=0;attempt<3;attempt++){
+   try{return await driver.connect(this.env.BROWSER,id)}catch(error){
+    if(/quota|429|limit/i.test(String(error?.message)))throw error
+    let missing=false
+    try{if(typeof this.env.BROWSER.getSession==='function')missing=await this.env.BROWSER.getSession(id)===null;else if(typeof driver.sessions==='function')missing=!(await driver.sessions(this.env.BROWSER)).some(s=>s.sessionId===id)}catch{}
+    if(missing)ytFail('session_expired','云端会话已结束，请重新登录',410)
+    if(attempt<2)await new Promise(resolve=>setTimeout(resolve,150*(attempt+1)))
+   }
+  }
+  ytFail('browser_busy','云端会话尚在释放连接，请返回 App 后稍候重试',409)
+ }
  async browser(restore=true){
   const driver=await this.driver(),saved=await this.ctx.storage.get('browser')
-  if(saved){try{return await driver.connect(this.env.BROWSER,saved)}catch{await this.ctx.storage.delete('browser');await this.ctx.storage.delete('tickets');this.tickets.clear()}}
+  if(saved){try{return await this.connectBrowser(saved)}catch(e){if(!(e instanceof SessionError)||e.code!=='session_expired')throw e;await this.ctx.storage.delete('browser');await this.ctx.storage.delete('tickets');await this.ctx.storage.delete('handoff');this.tickets.clear()}}
   const browser=await driver.launch(this.env.BROWSER,{keep_alive:restore?60000:300000});await this.ctx.storage.put('browser',browser.sessionId());await this.touch(restore?60000:300000)
   try{if(restore){const state=await this.stored();if(state?.cookies?.length){const page=await browser.newPage();await page.setCookie(...state.cookies)}}return browser}catch(e){await browser.close();await this.ctx.storage.delete('browser');throw e}
  }
  async touch(ms=60000){await this.ctx.storage.setAlarm(Date.now()+ms)}
- async closeBrowser(){const id=await this.ctx.storage.get('browser');if(id)try{const driver=await this.driver(),browser=await driver.connect(this.env.BROWSER,id);await browser.close()}catch{}await this.ctx.storage.delete('browser');await this.ctx.storage.delete('tickets');this.tickets.clear()}
+ async closeBrowser(){
+  const id=await this.ctx.storage.get('browser')
+  if(id){
+   if(typeof this.env.BROWSER.closeSession==='function'){try{const result=await this.env.BROWSER.closeSession(id);if((typeof result==='string'?result:result?.status)==='closing'){await new Promise(r=>setTimeout(r,300));if(typeof this.env.BROWSER.getSession==='function'&&await this.env.BROWSER.getSession(id)!==null)ytFail('browser_busy','旧登录窗口正在关闭，请稍候再试',409)}}catch(error){let missing=false;try{missing=typeof this.env.BROWSER.getSession==='function'&&await this.env.BROWSER.getSession(id)===null}catch{}if(!missing)throw error}}
+   else{try{const browser=await this.connectBrowser(id);await browser.close()}catch(e){if(!(e instanceof SessionError)||e.code!=='session_expired')throw e}}
+  }
+  await this.ctx.storage.delete('browser');await this.ctx.storage.delete('tickets');await this.ctx.storage.delete('handoff');this.tickets.clear()
+ }
  async alarm(){const result=this.serial.then(()=>this.closeBrowser(),()=>this.closeBrowser());this.serial=result.catch(()=>{});return result}
  async page(browser){return (await browser.pages()).find(p=>/^https:\/\/(www\.)?youtube\.com\//.test(p.url()))??await browser.newPage()}
  async login(){
+  const existing=await this.ctx.storage.get('handoff'),id=await this.ctx.storage.get('browser')
+  if(existing&&id){let handoff;try{handoff=await openSession(existing,this.env.PROXY_KEY)}catch{}
+   let alive=true;try{if(typeof this.env.BROWSER.getSession==='function')alive=await this.env.BROWSER.getSession(id)!==null}catch{}
+   if(alive&&handoff?.expiresAt>Date.now()&&validLiveURL(handoff.liveURL))return ytJSON(handoff)
+  }
   await this.closeBrowser();const browser=await this.browser(false)
-  try{const page=await this.page(browser);await page.setViewport({width:390,height:844,isMobile:true,hasTouch:true});await page.goto('https://www.youtube.com/',{waitUntil:'domcontentloaded',timeout:15000});const cdp=await page.createCDPSession();const live=await cdp.send('Cloudflare.getLiveView',{mode:'tab',expiresInMs:300000});if(!validLiveURL(live.devtoolsFrontendUrl))ytFail('invalid_handoff','云端登录地址无效',502);await this.touch(5*60000);return ytJSON({state:'awaiting_login',liveURL:live.devtoolsFrontendUrl,expiresAt:Date.now()+5*60000})}finally{await browser.disconnect()}
+  try{const page=await this.page(browser);await page.setViewport({width:390,height:844,isMobile:false,hasTouch:false});await page.goto('https://www.youtube.com/',{waitUntil:'domcontentloaded',timeout:15000});const cdp=await page.createCDPSession();const live=await cdp.send('Cloudflare.getLiveView',{mode:'tab',expiresInMs:300000});if(!validLiveURL(live.devtoolsFrontendUrl))ytFail('invalid_handoff','云端登录地址无效',502);const handoff={state:'awaiting_login',liveURL:live.devtoolsFrontendUrl,expiresAt:Date.now()+5*60000};await this.ctx.storage.put('handoff',await sealSession(handoff,this.env.PROXY_KEY));await this.touch(5*60000);return ytJSON(handoff)}finally{await browser.disconnect()}
  }
  async finish(){
   const id=await this.ctx.storage.get('browser');if(!id)ytFail('login_expired','登录窗口已过期，请重新开始',410)
-  const driver=await this.driver();let browser;try{browser=await driver.connect(this.env.BROWSER,id)}catch{ytFail('login_expired','登录窗口已过期，请重新开始',410)}
+  const browser=await this.connectBrowser(id)
   try{
-   const page=(await browser.pages()).find(p=>/^https:\/\/(www\.)?youtube\.com\//.test(p.url()));if(!page)ytFail('login_incomplete','请在官方页面完成登录，并回到 YouTube 首页')
+   const page=(await browser.pages()).find(p=>/^https:\/\/(www\.)?youtube\.com\//.test(p.url()))??await browser.newPage();await page.goto('https://www.youtube.com/',{waitUntil:'domcontentloaded',timeout:10000})
+   if(typeof page.waitForFunction==='function')await page.waitForFunction(()=>window.ytcfg?.get?.('LOGGED_IN')!=null||window.ytInitialData?.responseContext?.mainAppWebResponseContext?.loggedOut!=null,{timeout:3000}).catch(()=>{});
    const signedIn=await page.evaluate(()=>window.ytcfg?.get?.('LOGGED_IN')===true||window.ytInitialData?.responseContext?.mainAppWebResponseContext?.loggedOut===false)
-   if(!signedIn)ytFail('login_incomplete','尚未确认 YouTube 已登录，请完成登录后再点确认')
+   if(!signedIn)ytFail('login_incomplete','尚未确认 YouTube 已登录，请完成登录后返回 App')
    const cookies=(await page.cookies('https://www.youtube.com')).filter(c=>/^\.?youtube\.com$/.test(c.domain));if(!cookies.length)ytFail('login_incomplete','未取得可恢复的 YouTube 会话')
-   await this.save({cookies,connectedAt:Date.now()});await browser.close();await this.ctx.storage.delete('browser');this.tickets.clear();return ytJSON({state:'connected',connectedAt:Date.now()})
+   await this.save({cookies,connectedAt:Date.now()});await browser.close();await this.ctx.storage.delete('browser');await this.ctx.storage.delete('handoff');await this.ctx.storage.delete('tickets');this.tickets.clear();return ytJSON({state:'connected',connectedAt:Date.now()})
   }finally{try{await browser.disconnect()}catch{}}
  }
  async resolve(videoId){
@@ -66,7 +92,7 @@ export class YouTubeSession {
   const range=/^bytes=(\d+)-(\d*)$/.exec(request.headers.get('Range')??'bytes=0-');if(!range)ytFail('invalid_range','音频读取范围无效',416)
   const start=Number(range[1]),end=Math.min(range[2]?Number(range[2]):audio.size-1,start+1048575,audio.size-1)
   if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end<start)ytFail('invalid_range','音频读取范围无效',416)
-  const driver=await this.driver();let browser;try{browser=await driver.connect(this.env.BROWSER,audio.browserId)}catch{ytFail('media_expired','音轨会话已结束，请重试播放',410)}
+  const browser=await this.connectBrowser(audio.browserId)
   try{
    const pages=await browser.pages(),page=pages.find(p=>/^https:\/\/(www\.)?youtube\.com\//.test(p.url()));if(!page)ytFail('media_expired','音轨会话已结束，请重试播放',410)
    const result=await page.evaluate(async({url,start,end,total})=>{const response=await fetch(url,{headers:{Range:`bytes=${start}-${end}`},credentials:'omit',signal:AbortSignal.timeout(15000)});if(response.status!==206||response.headers.get('content-range')!==`bytes ${start}-${end}/${total}`||!/^audio\/mp4/.test(response.headers.get('content-type')??'')){await response.body?.cancel();return {status:response.status}}
@@ -78,7 +104,7 @@ export class YouTubeSession {
  }
  async handle(request){
   const path=new URL(request.url).pathname
-  if(path==='/youtube/session'&&request.method==='GET'){const state=await this.stored();return ytJSON({available:true,state:state?'connected':'disconnected',connectedAt:state?.connectedAt??null})}
+  if(path==='/youtube/session'&&request.method==='GET'){const state=await this.stored();return ytJSON({available:true,state:state?'connected':'disconnected',connectedAt:state?.connectedAt??null,pendingLogin:Boolean(await this.ctx.storage.get('handoff')),lifecycleVersion:2})}
   if(path==='/youtube/login'&&request.method==='POST')return this.login()
   if(path==='/youtube/finish'&&request.method==='POST')return this.finish()
   if(path==='/youtube/disconnect'&&request.method==='POST'){await this.closeBrowser();await this.ctx.storage.deleteAll();return ytJSON({state:'disconnected'})}
@@ -741,7 +767,7 @@ export async function socketHttpFetch(target,init,connectOverride){
  const socketConnect=address=>{if(address.port!==443||address.hostname!==new URL(target).hostname)throw Error('Socket destination mismatch');const socket=connect(address,{secureTransport:'on',allowHalfOpen:false});socket.closed?.catch(()=>{});return socket}
  return createFetcher({connect:()=>{throw Error('HTTPS required')},connectTls:socketConnect})(target,{...init,redirect:'manual'})
 }
-export const workerBuild='2026-11-16.1'
+export const workerBuild='2026-11-16.2'
 function diagnosticOverrides(request){
  const raw=request.headers.get('X-Proxy-Probe-Headers')
  if(!raw)return []
