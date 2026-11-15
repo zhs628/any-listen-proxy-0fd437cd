@@ -2,6 +2,12 @@
 
 这是当前设备导出的独立工程。仓库和 Cloudflare 服务由你自己的账户管理，不依赖公共模板仓库。
 
+## 手机连接 YouTube
+
+本版本新增 Browser Run 与 YouTubeSession Durable Object。更新时上传 worker.mjs、package.json 和 wrangler.jsonc；保留原服务名称和连接密钥，等待 Git 构建完成。Wrangler 会声明 BROWSER 与 YOUTUBE_SESSION 绑定及 SQLite 迁移。如账户提示未启用 Browser Run，请在 Cloudflare 控制台启用后重新部署；不要自动升级付费套餐。免费浏览器时长有限，超额时功能会明确失败。
+
+部署后在 App 的个人代理页面连接 YouTube。登录在 Cloudflare 托管浏览器中的 YouTube 官方页面完成；密码不经过 App。只保存 youtube.com 的会话 Cookie，使用连接密钥派生的 AES-GCM 密钥加密存入你自己的 Durable Object。密钥变更后需要重新登录。点击断开连接会删除保存的会话。登录不保证音轨一定可用，必须单独执行音频读取检查。
+
 ## 首次部署
 
 1. 创建 GitHub 私有仓库，解压工程后上传文件到仓库根目录。不要把 ZIP 文件本身上传。
@@ -14,7 +20,7 @@
 
 ## 后续使用
 
-代理只处理请求转发，日常音源策略随 App 更新。已部署的代理可以持续使用，无需随每次 App 更新重新上传仓库。通道自身的能力或修复变化仍可能需要更新工程；不会从第三方仓库自动拉取代码。
+通用代理处理请求转发，日常音源策略随 App 更新。YouTube 登录是独立的可选浏览器模块，只有主动连接或播放该音源才启动浏览器。已部署的代理可以持续使用，无需随每次 App 更新重新上传仓库。通道自身的能力或修复变化仍可能需要更新工程；不会从第三方仓库自动拉取代码。
 
 ## 维护与迁移
 
@@ -34,7 +40,7 @@ GET/HEAD/POST 与 Range 流式响应保持兼容。`/health` 返回 protocolVers
 
 支持通过 X-Proxy-Upstream-Headers JSON 传入最多 32 项、16 KiB 的上游请求头，包括 Authorization、Referer、Origin、Accept 和平台自定义头；它与个人代理连接密钥独立。Cookie 和连接控制头不接受，跨源重定向丢弃整组头；每次跳转重新检查目标规则。上游 Authorization 在诊断摘要中隐藏。普通请求不自动执行诊断。
 
-支持 POST 转发：JSON、表单及二进制请求体上限 1 MiB，Content-Type 保持一致；仅 /proxy 接受 POST，连接密钥仍独立验证。POST 在 App 中直接走代理，不先直连、不自动重试。301/302/303 跳转转为 GET 并丢弃请求体；307/308 仅允许同源跳转，防止把请求体提交到其他站点。health 返回 post-body-v1 能力、POST 方法和请求体上限。现有 GET/HEAD/Range 保持流式响应。此协议不承诺 WebSocket、DRM 或特殊签名协议通用支持。新增这类传输能力仍可能需要更新 Worker；平台业务解析和签名优先留在 App。
+支持 POST 转发：JSON、表单及二进制请求体上限 1 MiB，Content-Type 保持一致；/proxy 接受通用转发 POST；/youtube/* 接受受保护的会话操作，连接密钥仍独立验证。POST 在 App 中直接走代理，不先直连、不自动重试。301/302/303 跳转转为 GET 并丢弃请求体；307/308 仅允许同源跳转，防止把请求体提交到其他站点。health 返回 post-body-v1 能力、POST 方法和请求体上限。现有 GET/HEAD/Range 保持流式响应。此协议不承诺 WebSocket、DRM 或特殊签名协议通用支持。新增这类传输能力仍可能需要更新 Worker；平台业务解析和签名优先留在 App。
 
 
 ## 转发范围

@@ -2,6 +2,9 @@
   "name": "any-listen-proxy-0fd437cd",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "@cloudflare/puppeteer": "2.0.0"
+  },
   "devDependencies": {
     "wrangler": "4.102.0"
   }

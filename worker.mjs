@@ -1,3 +1,94 @@
+// BEGIN YOUTUBE SESSION
+// Owner-only Browser Run bridge. No credentials or signed CDN URLs leave the actor.
+const ytJSON=(value,status=200)=>Response.json(value,{status,headers:{'Cache-Control':'no-store'}})
+export class SessionError extends Error{constructor(code,message,status=409){super(message);this.code=code;this.status=status}}
+const ytFail=(code,message,status)=>{throw new SessionError(code,message,status)}
+export function validLiveURL(value){try{const u=new URL(value);return u.protocol==='https:'&&u.hostname==='live.browser.run'&&!u.username&&!u.password&&!u.port}catch{return false}}
+export function matchAudioURL(value,formats){try{const u=new URL(value);if(u.protocol!=='https:'||u.username||u.password||u.port||!/(^|\.)googlevideo\.com$/.test(u.hostname)||u.searchParams.get('mime')!=='audio/mp4')return;const format=formats.find(f=>String(f.itag)===u.searchParams.get('itag')&&String(f.contentLength)===u.searchParams.get('clen')&&String(f.lastModified)===u.searchParams.get('lmt'));if(format)return {url:u.href,size:Number(format.contentLength)}}catch{}}
+async function cipherKey(secret){const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode('any-listen-youtube-session-v1\n'+secret));return crypto.subtle.importKey('raw',hash,'AES-GCM',false,['encrypt','decrypt'])}
+export async function sealSession(value,secret){const iv=crypto.getRandomValues(new Uint8Array(12)),key=await cipherKey(secret);return {iv:[...iv],data:[...new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv},key,new TextEncoder().encode(JSON.stringify(value))))]}}
+export async function openSession(value,secret){return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:new Uint8Array(value.iv)},await cipherKey(secret),new Uint8Array(value.data))))}
+const ytBrowserFactory=async()=> (await import('@cloudflare/puppeteer')).default
+export class YouTubeSession {
+ constructor(ctx,env,driver=ytBrowserFactory){this.ctx=ctx;this.env=env;this.driver=driver;this.serial=Promise.resolve();this.tickets=new Map()}
+ fetch(request){const work=()=>this.handle(request).catch(e=>e instanceof SessionError?ytJSON({error:e.code,message:e.message},e.status):ytJSON({error:'browser_operation_failed',message:/limit|quota|429/i.test(String(e?.message))?'云端浏览器额度或并发已达到限制，请稍后重试':'云端浏览器操作未完成，请重新连接；Google 可能拒绝此浏览器'},502));const result=this.serial.then(work,work);this.serial=result.then(()=>{},()=>{});return result}
+ async stored(){const state=await this.ctx.storage.get('session');if(!state)return null;try{return await openSession(state,this.env.PROXY_KEY)}catch{ytFail('session_key_changed','连接密钥已变更，请断开并重新登录')}}
+ async save(value){await this.ctx.storage.put('session',await sealSession(value,this.env.PROXY_KEY))}
+ async browser(restore=true){
+  const driver=await this.driver(),saved=await this.ctx.storage.get('browser')
+  if(saved){try{return await driver.connect(this.env.BROWSER,saved)}catch{await this.ctx.storage.delete('browser');await this.ctx.storage.delete('tickets');this.tickets.clear()}}
+  const browser=await driver.launch(this.env.BROWSER,{keep_alive:restore?60000:300000});await this.ctx.storage.put('browser',browser.sessionId());await this.touch(restore?60000:300000)
+  try{if(restore){const state=await this.stored();if(state?.cookies?.length){const page=await browser.newPage();await page.setCookie(...state.cookies)}}return browser}catch(e){await browser.close();await this.ctx.storage.delete('browser');throw e}
+ }
+ async touch(ms=60000){await this.ctx.storage.setAlarm(Date.now()+ms)}
+ async closeBrowser(){const id=await this.ctx.storage.get('browser');if(id)try{const driver=await this.driver(),browser=await driver.connect(this.env.BROWSER,id);await browser.close()}catch{}await this.ctx.storage.delete('browser');await this.ctx.storage.delete('tickets');this.tickets.clear()}
+ async alarm(){const result=this.serial.then(()=>this.closeBrowser(),()=>this.closeBrowser());this.serial=result.catch(()=>{});return result}
+ async page(browser){return (await browser.pages()).find(p=>/^https:\/\/(www\.)?youtube\.com\//.test(p.url()))??await browser.newPage()}
+ async login(){
+  await this.closeBrowser();const browser=await this.browser(false)
+  try{const page=await this.page(browser);await page.setViewport({width:390,height:844,isMobile:true,hasTouch:true});await page.goto('https://www.youtube.com/',{waitUntil:'domcontentloaded',timeout:15000});const cdp=await page.createCDPSession();const live=await cdp.send('Cloudflare.getLiveView',{mode:'tab',expiresInMs:300000});if(!validLiveURL(live.devtoolsFrontendUrl))ytFail('invalid_handoff','云端登录地址无效',502);await this.touch(5*60000);return ytJSON({state:'awaiting_login',liveURL:live.devtoolsFrontendUrl,expiresAt:Date.now()+5*60000})}finally{await browser.disconnect()}
+ }
+ async finish(){
+  const id=await this.ctx.storage.get('browser');if(!id)ytFail('login_expired','登录窗口已过期，请重新开始',410)
+  const driver=await this.driver();let browser;try{browser=await driver.connect(this.env.BROWSER,id)}catch{ytFail('login_expired','登录窗口已过期，请重新开始',410)}
+  try{
+   const page=(await browser.pages()).find(p=>/^https:\/\/(www\.)?youtube\.com\//.test(p.url()));if(!page)ytFail('login_incomplete','请在官方页面完成登录，并回到 YouTube 首页')
+   const signedIn=await page.evaluate(()=>window.ytcfg?.get?.('LOGGED_IN')===true||window.ytInitialData?.responseContext?.mainAppWebResponseContext?.loggedOut===false)
+   if(!signedIn)ytFail('login_incomplete','尚未确认 YouTube 已登录，请完成登录后再点确认')
+   const cookies=(await page.cookies('https://www.youtube.com')).filter(c=>/^\.?youtube\.com$/.test(c.domain));if(!cookies.length)ytFail('login_incomplete','未取得可恢复的 YouTube 会话')
+   await this.save({cookies,connectedAt:Date.now()});await browser.close();await this.ctx.storage.delete('browser');this.tickets.clear();return ytJSON({state:'connected',connectedAt:Date.now()})
+  }finally{try{await browser.disconnect()}catch{}}
+ }
+ async resolve(videoId){
+  if(!/^[A-Za-z0-9_-]{11}$/.test(videoId))ytFail('invalid_video','歌曲标识无效',400)
+  if(!await this.stored())ytFail('session_expired','请先连接 YouTube 账号',401)
+  const browser=await this.browser();const page=await this.page(browser),urls=[]
+  const capture=req=>{if(urls.length<100&&/^https:\/\/[^/]*googlevideo\.com\//.test(req.url()))urls.push(req.url())};page.on('request',capture)
+  try{
+   await page.goto('https://www.youtube.com/watch?v='+videoId,{waitUntil:'domcontentloaded',timeout:15000})
+   await page.waitForFunction(id=>window.ytInitialPlayerResponse?.videoDetails?.videoId===id,{timeout:10000},videoId)
+   const info=await page.evaluate(()=>{const p=window.ytInitialPlayerResponse;return {id:p?.videoDetails?.videoId,duration:Number(p?.videoDetails?.lengthSeconds),status:p?.playabilityStatus?.status,reason:p?.playabilityStatus?.reason,formats:(p?.streamingData?.adaptiveFormats??[]).filter(f=>/^audio\/mp4/.test(f.mimeType??'')).map(f=>({itag:f.itag,contentLength:f.contentLength,lastModified:f.lastModified}))}})
+   if(info.id!==videoId||info.status!=='OK')ytFail('playback_refused','YouTube 仍拒绝此会话播放；请打开登录页检查账号与验证状态')
+   await page.evaluate(()=>{document.querySelector('video')?.play()?.catch(()=>{})})
+   let audio
+   for(let i=0;i<12&&!audio;i++){for(const value of urls){audio=matchAudioURL(value,info.formats);if(audio)break}if(!audio)await new Promise(r=>setTimeout(r,500))}
+   await page.evaluate(()=>document.querySelector('video')?.pause())
+   if(!audio||!Number.isSafeInteger(audio.size)||audio.size<1000||!(info.duration>0))ytFail('no_audio_resource','当前网页登录会话未提供可核实的 AAC 音轨；尚不能用于播放或下载')
+   const ticket=crypto.randomUUID().replaceAll('-',''),expiresAt=Date.now()+30*60000
+   this.tickets.set(ticket,{...audio,expiresAt,browserId:browser.sessionId()});while(this.tickets.size>16)this.tickets.delete(this.tickets.keys().next().value);await this.ctx.storage.put('tickets',await sealSession([...this.tickets],this.env.PROXY_KEY))
+   await this.touch();return ytJSON({id:videoId,ticket,size:audio.size,duration:info.duration,expiresAt,format:'audio/mp4'})
+  }finally{page.off('request',capture);await browser.disconnect()}
+ }
+ async media(request){
+  if(!this.tickets.size){const saved=await this.ctx.storage.get('tickets');if(saved)try{this.tickets=new Map(await openSession(saved,this.env.PROXY_KEY))}catch{}}
+  const url=new URL(request.url),ticket=url.searchParams.get('ticket'),audio=this.tickets.get(ticket)
+  if(!audio||audio.expiresAt<Date.now()||audio.browserId!==await this.ctx.storage.get('browser'))ytFail('media_expired','音轨会话已结束，请重试播放',410)
+  const range=/^bytes=(\d+)-(\d*)$/.exec(request.headers.get('Range')??'bytes=0-');if(!range)ytFail('invalid_range','音频读取范围无效',416)
+  const start=Number(range[1]),end=Math.min(range[2]?Number(range[2]):audio.size-1,start+1048575,audio.size-1)
+  if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<0||end<start)ytFail('invalid_range','音频读取范围无效',416)
+  const driver=await this.driver();let browser;try{browser=await driver.connect(this.env.BROWSER,audio.browserId)}catch{ytFail('media_expired','音轨会话已结束，请重试播放',410)}
+  try{
+   const pages=await browser.pages(),page=pages.find(p=>/^https:\/\/(www\.)?youtube\.com\//.test(p.url()));if(!page)ytFail('media_expired','音轨会话已结束，请重试播放',410)
+   const result=await page.evaluate(async({url,start,end,total})=>{const response=await fetch(url,{headers:{Range:`bytes=${start}-${end}`},credentials:'omit',signal:AbortSignal.timeout(15000)});if(response.status!==206||response.headers.get('content-range')!==`bytes ${start}-${end}/${total}`||!/^audio\/mp4/.test(response.headers.get('content-type')??'')){await response.body?.cancel();return {status:response.status}}
+    const reader=response.body.getReader(),parts=[];let length=0;while(true){const {done,value}=await reader.read();if(done)break;length+=value.length;if(length>end-start+1){await reader.cancel();return {status:502}}parts.push(value)}if(length!==end-start+1)return {status:502};const bytes=new Uint8Array(length);let at=0;for(const part of parts){bytes.set(part,at);at+=part.length}let text='';for(let i=0;i<bytes.length;i+=8192)text+=String.fromCharCode(...bytes.subarray(i,i+8192));return {status:206,data:btoa(text)}},{url:audio.url,start,end,total:audio.size})
+   if(result.status!==206||!result.data)ytFail('media_rejected',`YouTube 音频读取失败（HTTP ${Number(result.status)||502}）`,502)
+   const bytes=Uint8Array.from(atob(result.data),c=>c.charCodeAt(0));if(bytes.length!==end-start+1)ytFail('media_incomplete','音频分段不完整',502)
+   await this.touch();return new Response(request.method==='HEAD'?null:bytes,{status:206,headers:{'Content-Type':'audio/mp4','Content-Range':`bytes ${start}-${end}/${audio.size}`,'Content-Length':String(bytes.length),'Accept-Ranges':'bytes','Cache-Control':'no-store'}})
+  }finally{await browser.disconnect()}
+ }
+ async handle(request){
+  const path=new URL(request.url).pathname
+  if(path==='/youtube/session'&&request.method==='GET'){const state=await this.stored();return ytJSON({available:true,state:state?'connected':'disconnected',connectedAt:state?.connectedAt??null})}
+  if(path==='/youtube/login'&&request.method==='POST')return this.login()
+  if(path==='/youtube/finish'&&request.method==='POST')return this.finish()
+  if(path==='/youtube/disconnect'&&request.method==='POST'){await this.closeBrowser();await this.ctx.storage.deleteAll();return ytJSON({state:'disconnected'})}
+  if(path==='/youtube/resolve'&&request.method==='POST'){if(Number(request.headers.get('Content-Length'))>4096)ytFail('invalid_input','请求过大',413);const body=await request.text();if(body.length>4096)ytFail('invalid_input','请求过大',413);return this.resolve(JSON.parse(body).id)}
+  if(path==='/youtube/media'&&['GET','HEAD'].includes(request.method))return this.media(request)
+  return ytJSON({error:'not_found',message:'接口不存在'},404)
+ }
+}
+
+// END YOUTUBE SESSION
 // BEGIN SOCKET-FETCH VENDOR
 /* PeronGH/socket-fetch, MIT, pinned 3db1b05e853694a6453a5f159c573ef600d2ed5b
 MIT License
@@ -650,7 +741,7 @@ export async function socketHttpFetch(target,init,connectOverride){
  const socketConnect=address=>{if(address.port!==443||address.hostname!==new URL(target).hostname)throw Error('Socket destination mismatch');const socket=connect(address,{secureTransport:'on',allowHalfOpen:false});socket.closed?.catch(()=>{});return socket}
  return createFetcher({connect:()=>{throw Error('HTTPS required')},connectTls:socketConnect})(target,{...init,redirect:'manual'})
 }
-export const workerBuild='2026-11-14.3'
+export const workerBuild='2026-11-16.1'
 function diagnosticOverrides(request){
  const raw=request.headers.get('X-Proxy-Probe-Headers')
  if(!raw)return []
@@ -732,7 +823,7 @@ export function createHandler(outbound=fetch,connectSocket,socketTransport) {
    headers.set('Access-Control-Allow-Headers','Authorization, Content-Type, Range, If-Range, If-None-Match, If-Modified-Since, X-Proxy-Probe-Headers, X-Spotify-Authorization, X-Proxy-Upstream-Headers')
    headers.set('Access-Control-Max-Age','600');return reply(null,204)
   }
-  if(!['GET','HEAD','POST'].includes(request.method)||request.method==='POST'&&url.pathname!=='/proxy')return reply('Method is not allowed',405)
+  if(!['GET','HEAD','POST'].includes(request.method)||request.method==='POST'&&url.pathname!=='/proxy'&&!url.pathname.startsWith('/youtube/'))return reply('Method is not allowed',405)
   if(url.pathname==='/'){
    if(!env.PROXY_KEY||!app)return reply('Proxy configuration incomplete',503)
    const signingKey=await crypto.subtle.importKey('raw',new TextEncoder().encode(env.PROXY_KEY),{name:'HMAC',hash:'SHA-256'},false,['sign'])
@@ -746,12 +837,17 @@ export function createHandler(outbound=fetch,connectSocket,socketTransport) {
   // Query key supports native media elements; avoid access logs and caching.
   const key=request.headers.get('Authorization')?.replace(/^Bearer /,'')||url.searchParams.get('key')||''
   if(key!==env.PROXY_KEY)return reply('Invalid proxy key',401)
+  if(url.pathname.startsWith('/youtube/')){
+   if(!env.BROWSER||!env.YOUTUBE_SESSION)return reply(JSON.stringify({error:'browser_binding_missing',message:'请更新个人代理工程，并在 Cloudflare 启用 Browser Run 与会话存储绑定'}),503)
+   const actor=env.YOUTUBE_SESSION.get(env.YOUTUBE_SESSION.idFromName('owner'))
+   const result=await actor.fetch(request);const merged=new Headers(result.headers);headers.forEach((v,k)=>merged.set(k,v));return new Response(result.body,{status:result.status,headers:merged})
+  }
   const debugging=url.pathname==='/diagnostics'||url.pathname==='/probe'
   const started=debugging?Date.now():0,requestId=debugging?crypto.randomUUID():'',hops=debugging?[]:null
   const edge=debugging?{colo:request.cf?.colo??null,country:request.cf?.country??null}:null
   const json=(data,status=200)=>{headers.set('Content-Type','application/json');return reply(JSON.stringify(data),status)}
   if(url.pathname==='/diagnostics')return json({service:'any-listen-personal-proxy',diagnosticsVersion:1,diagnosticsRevision:5,workerBuild,transport:transportInfo(env),requestId,edge,capabilities:['on-demand-probe','range-probe','bilibili-request-profile','request-probe','head-probe','full-request-trace','probe-header-overrides','tls-socket-probe','bilibili-api-tls','anonymous-device-cookie','spotify-metadata'],probeTransports:['production','fetch','tls-socket'],probeModes:['request','range','head'],defaultProbeMode:'range',observability:{redacted:false,responseHeaders:true,requestHeaders:'fetch-input',wireHeaders:false,egressIP:false,tlsFingerprint:false},storage:'none',automaticDiagnostics:false,limits:{redirects:4,probeTimeoutMs:8000,maxResponseHeadersBytes:32768,maxOverrideHeaders:32,maxOverrideBytes:16384,productionApiTimeoutMs:15000,productionApiMaxBodyBytes:2097152,productionApiMaxHeadersBytes:65536,anonymousCookieTtlMs:1800000},allowedHosts:hosts})
-  if(url.pathname==='/health'){headers.set('Content-Type','application/json');return reply(JSON.stringify({service:'any-listen-personal-proxy',version:1,diagnosticsVersion:1,diagnosticsRevision:5,workerBuild,...transportInfo(env)}))}
+  if(url.pathname==='/health'){headers.set('Content-Type','application/json');return reply(JSON.stringify({service:'any-listen-personal-proxy',version:1,diagnosticsVersion:1,diagnosticsRevision:5,workerBuild,...transportInfo(env),youtubeBrowserSession:Boolean(env.BROWSER&&env.YOUTUBE_SESSION)}))}
   const probing=url.pathname==='/probe',mode=url.searchParams.get('mode')||'range'
   if(probing&&!['request','range','head'].includes(mode))return json({service:'any-listen-personal-proxy',error:'unsupported_probe_mode',probeModes:['request','range','head']},400)
   if(!probing&&url.pathname!=='/proxy')return reply('Not found',404)
