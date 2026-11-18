@@ -789,7 +789,7 @@ export async function socketHttpFetch(target,init,connectOverride){
  const socketConnect=address=>{if(address.port!==443||address.hostname!==new URL(target).hostname)throw Error('Socket destination mismatch');const socket=connect(address,{secureTransport:'on',allowHalfOpen:false});socket.closed?.catch(()=>{});return socket}
  return createFetcher({connect:()=>{throw Error('HTTPS required')},connectTls:socketConnect})(target,{...init,redirect:'manual'})
 }
-export const workerBuild='2026-11-16.3'
+export const workerBuild='2026-11-17.1'
 function diagnosticOverrides(request){
  const raw=request.headers.get('X-Proxy-Probe-Headers')
  if(!raw)return []
@@ -885,6 +885,7 @@ export function createHandler(outbound=fetch,connectSocket,socketTransport) {
   // Query key supports native media elements; avoid access logs and caching.
   const key=request.headers.get('Authorization')?.replace(/^Bearer /,'')||url.searchParams.get('key')||''
   if(key!==env.PROXY_KEY)return reply('Invalid proxy key',401)
+  if(url.pathname.startsWith('/youtube/')&&url.pathname!=='/youtube/disconnect')return reply(JSON.stringify({error:'youtube_login_retired',message:'Cloudflare YouTube 登录已停用，请在 App 配置 Browserless Profile'}),410)
   if(url.pathname.startsWith('/youtube/')){
    if(!env.BROWSER||!env.YOUTUBE_SESSION)return reply(JSON.stringify({error:'browser_binding_missing',message:'请更新个人代理工程，并在 Cloudflare 启用 Browser Run 与会话存储绑定'}),503)
    const actor=env.YOUTUBE_SESSION.get(env.YOUTUBE_SESSION.idFromName('owner'))
@@ -895,7 +896,7 @@ export function createHandler(outbound=fetch,connectSocket,socketTransport) {
   const edge=debugging?{colo:request.cf?.colo??null,country:request.cf?.country??null}:null
   const json=(data,status=200)=>{headers.set('Content-Type','application/json');return reply(JSON.stringify(data),status)}
   if(url.pathname==='/diagnostics')return json({service:'any-listen-personal-proxy',diagnosticsVersion:1,diagnosticsRevision:5,workerBuild,transport:transportInfo(env),requestId,edge,capabilities:['on-demand-probe','range-probe','bilibili-request-profile','request-probe','head-probe','full-request-trace','probe-header-overrides','tls-socket-probe','bilibili-api-tls','anonymous-device-cookie','spotify-metadata'],probeTransports:['production','fetch','tls-socket'],probeModes:['request','range','head'],defaultProbeMode:'range',observability:{redacted:false,responseHeaders:true,requestHeaders:'fetch-input',wireHeaders:false,egressIP:false,tlsFingerprint:false},storage:'none',automaticDiagnostics:false,limits:{redirects:4,probeTimeoutMs:8000,maxResponseHeadersBytes:32768,maxOverrideHeaders:32,maxOverrideBytes:16384,productionApiTimeoutMs:15000,productionApiMaxBodyBytes:2097152,productionApiMaxHeadersBytes:65536,anonymousCookieTtlMs:1800000},allowedHosts:hosts})
-  if(url.pathname==='/health'){headers.set('Content-Type','application/json');return reply(JSON.stringify({service:'any-listen-personal-proxy',version:1,diagnosticsVersion:1,diagnosticsRevision:5,workerBuild,...transportInfo(env),youtubeBrowserSession:Boolean(env.BROWSER&&env.YOUTUBE_SESSION)}))}
+  if(url.pathname==='/health'){headers.set('Content-Type','application/json');return reply(JSON.stringify({service:'any-listen-personal-proxy',version:1,diagnosticsVersion:1,diagnosticsRevision:5,workerBuild,...transportInfo(env),youtubeBrowserSession:false}))}
   const probing=url.pathname==='/probe',mode=url.searchParams.get('mode')||'range'
   if(probing&&!['request','range','head'].includes(mode))return json({service:'any-listen-personal-proxy',error:'unsupported_probe_mode',probeModes:['request','range','head']},400)
   if(!probing&&url.pathname!=='/proxy')return reply('Not found',404)

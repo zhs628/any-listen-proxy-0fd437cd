@@ -2,11 +2,9 @@
 
 这是当前设备导出的独立工程。仓库和 Cloudflare 服务由你自己的账户管理，不依赖公共模板仓库。
 
-## 手机连接 YouTube
+## YouTube 登录
 
-本版本新增 Browser Run 与 YouTubeSession Durable Object。更新时上传 worker.mjs、package.json 和 wrangler.jsonc；保留原服务名称和连接密钥，等待 Git 构建完成。Wrangler 会声明 BROWSER 与 YOUTUBE_SESSION 绑定及 SQLite 迁移。如账户提示未启用 Browser Run，请在 Cloudflare 控制台启用后重新部署；不要自动升级付费套餐。免费浏览器时长有限，超额时功能会明确失败。
-
-部署后在 App 的个人代理页面点击登录 YouTube，云端浏览器会直接打开；返回 App 后自动确认登录状态。会话管理修复版本为 2026-11-16.2，已接入 Browser Run 的旧工程只需覆盖 worker.mjs，不新增绑定。登录在 Cloudflare 托管浏览器中的 YouTube 官方页面完成。原始页面直接接收输入；可选的本机输入面板通过临时加密 WebSocket 向你自己的云端会话发送文字，发送后清空本机输入，不存储密码或加入诊断。只保存 youtube.com 的会话 Cookie，使用连接密钥派生的 AES-GCM 密钥加密存入你自己的 Durable Object。密钥变更后需要重新登录。点击断开连接会删除保存的会话。登录不保证音轨一定可用，必须单独执行音频读取检查。
+YouTube 登录改由 App 中的 Browserless Profile 提供。本代理仅转发其 HTTPS 请求，不再创建 Cloudflare 云端登录窗口。BROWSER、YOUTUBE_SESSION 及已有迁移声明暂保留，以兼容已部署的 Durable Object；不要手动删除已有迁移。旧会话仍可通过受保护的 /youtube/disconnect 清除。
 
 ## 首次部署
 
@@ -20,7 +18,7 @@
 
 ## 后续使用
 
-通用代理处理请求转发，日常音源策略随 App 更新。YouTube 登录是独立的可选浏览器模块，只有主动连接或播放该音源才启动浏览器。已部署的代理可以持续使用，无需随每次 App 更新重新上传仓库。通道自身的能力或修复变化仍可能需要更新工程；不会从第三方仓库自动拉取代码。
+通用代理处理请求转发，日常音源策略随 App 更新。Browserless 登录和音源业务随 App 更新，Cloudflare 浏览器登录模块已停用。已部署的代理可以持续使用，无需随每次 App 更新重新上传仓库。通道自身的能力或修复变化仍可能需要更新工程；不会从第三方仓库自动拉取代码。
 
 ## 维护与迁移
 
